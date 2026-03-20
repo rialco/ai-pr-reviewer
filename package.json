@@ -1,0 +1,44 @@
+{
+  "name": "pr-reviewer",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Local PR review dashboard — monitors bot comments from Greptile and Copilot",
+  "scripts": {
+    "dev": "concurrently -n server,ui -c blue,green \"pnpm dev:server\" \"pnpm dev:ui\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:ui": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.28.2",
+  "dependencies": {
+    "@tanstack/react-query": "^5.91.0",
+    "better-sqlite3": "^12.8.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.577.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwind-merge": "^3.5.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.5.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^9.2.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "tailwindcss": "^4.2.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.0"
+  }
+}
