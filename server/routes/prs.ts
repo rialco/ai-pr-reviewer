@@ -19,12 +19,11 @@ import {
   getFixableCount,
   getSummary,
   updateLastPoll,
+  getLatestReviewPerReviewer,
 } from "../services/db.js";
 import {
   listOpenPRs,
-  fetchConfidenceScore,
   replyToReviewComment,
-  postPRComment,
 } from "../services/github.js";
 import {
   analyzeComments,
@@ -44,20 +43,20 @@ import {
   addAnalysisOutput,
   completeAnalysisJob,
   failAnalysisJob,
-  getAllJobs,
+  getActivityFeed,
 } from "../services/jobs.js";
 
 const router = Router();
 
 // List open PRs for all repos
-router.get("/", (_req, res) => {
+router.get("/", async (_req, res) => {
   const repos = getRepos();
-  const allPRs = repos.flatMap((repo) => listOpenPRs(repo));
-  res.json(allPRs);
+  const results = await Promise.all(repos.map((repo) => listOpenPRs(repo)));
+  res.json(results.flat());
 });
 
 // Sync a specific repo: list PRs, fetch comments, clean up stale data
-router.post("/sync/:repo", (req, res) => {
+router.post("/sync/:repo", async (req, res) => {
   const repoLabel = decodeURIComponent(req.params.repo);
   const repo = getRepo(repoLabel);
   if (!repo) {
@@ -65,7 +64,7 @@ router.post("/sync/:repo", (req, res) => {
     return;
   }
 
-  const { prs, newCount, cleaned } = syncRepo(repo);
+  const { prs, newCount, cleaned } = await syncRepo(repo);
   updateLastPoll();
   res.json({ prs: prs.length, newComments: newCount, cleaned });
 });
@@ -109,7 +108,7 @@ router.get("/:repo/:prNumber/comments", (req, res) => {
 });
 
 // Refresh comments for a specific PR from GitHub
-router.post("/:repo/:prNumber/refresh", (req, res) => {
+router.post("/:repo/:prNumber/refresh", async (req, res) => {
   const repoLabel = decodeURIComponent(req.params.repo);
   const prNumber = parseInt(req.params.prNumber, 10);
 
@@ -119,14 +118,14 @@ router.post("/:repo/:prNumber/refresh", (req, res) => {
     return;
   }
 
-  const prs = listOpenPRs(repo);
+  const prs = await listOpenPRs(repo);
   const pr = prs.find((p) => p.number === prNumber);
   if (!pr) {
     res.status(404).json({ error: "PR not found or not open" });
     return;
   }
 
-  const { newCount } = pollPR(repoLabel, prNumber, pr.title, pr.url);
+  const { newCount } = await pollPR(repoLabel, prNumber, pr.title, pr.url);
   res.json({ newComments: newCount });
 });
 
@@ -191,16 +190,16 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
   }
 
   // Track in the global job system
-  startAnalysisJob(repoLabel, prNumber, toAnalyze.length);
+  const jobId = startAnalysisJob(repoLabel, prNumber, toAnalyze.length);
 
   try {
     const results = await analyzeComments(toAnalyze, repo, (event) => {
       sendEvent(event);
       // Mirror progress to the server-side job tracker
       if (event.step === "claude_output") {
-        addAnalysisOutput(repoLabel, prNumber, event.message);
+        addAnalysisOutput(jobId, repoLabel, prNumber, event.message);
       } else {
-        updateAnalysisStep(repoLabel, prNumber, event.message, event.detail);
+        updateAnalysisStep(jobId, repoLabel, prNumber, event.message, event.detail);
       }
     });
 
@@ -209,7 +208,7 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
       updateCommentAnalysis(repoLabel, r.commentId, r);
     }
 
-    completeAnalysisJob(repoLabel, prNumber);
+    completeAnalysisJob(jobId);
     sendEvent({ type: "complete", analyzed: results.length, results });
     res.end();
   } catch (err) {
@@ -217,7 +216,7 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
     for (const c of toAnalyze) {
       updateCommentStatus(repoLabel, c.id, "new");
     }
-    failAnalysisJob(repoLabel, prNumber, String(err));
+    failAnalysisJob(jobId, String(err));
     sendEvent({ type: "error", message: String(err) });
     res.end();
   }
@@ -266,7 +265,7 @@ router.post("/:repo/:prNumber/recategorize/:commentId", (req, res) => {
 });
 
 // Fix comments for a PR
-router.post("/:repo/:prNumber/fix", (req, res) => {
+router.post("/:repo/:prNumber/fix", async (req, res) => {
   const repoLabel = decodeURIComponent(req.params.repo);
   const prNumber = parseInt(req.params.prNumber, 10);
 
@@ -276,7 +275,7 @@ router.post("/:repo/:prNumber/fix", (req, res) => {
     return;
   }
 
-  const prs = listOpenPRs(repo);
+  const prs = await listOpenPRs(repo);
   const pr = prs.find((p) => p.number === prNumber);
   if (!pr) {
     res.status(404).json({ error: "PR not found" });
@@ -393,7 +392,7 @@ router.post("/:repo/:prNumber/revert", async (req, res) => {
     return;
   }
 
-  const prs = listOpenPRs(repo);
+  const prs = await listOpenPRs(repo);
   const pr = prs.find((p) => p.number === prNumber);
   if (!pr) {
     res.status(404).json({ error: "PR not found" });
@@ -440,7 +439,7 @@ router.post("/:repo/:prNumber/revert", async (req, res) => {
 });
 
 // Reply to fixed comments on GitHub
-router.post("/:repo/:prNumber/reply", (req, res) => {
+router.post("/:repo/:prNumber/reply", async (req, res) => {
   const repoLabel = decodeURIComponent(req.params.repo);
   const prNumber = parseInt(req.params.prNumber, 10);
   const { replies } = (req.body ?? {}) as {
@@ -452,100 +451,26 @@ router.post("/:repo/:prNumber/reply", (req, res) => {
     return;
   }
 
-  const results: Array<{ commentId: number; ok: boolean; error?: string }> = [];
-
-  for (const r of replies) {
-    try {
-      replyToReviewComment(repoLabel, prNumber, r.commentId, r.body);
+  // Post all replies in parallel
+  const settled = await Promise.allSettled(
+    replies.map(async (r) => {
+      await replyToReviewComment(repoLabel, prNumber, r.commentId, r.body);
       markCommentReplied(repoLabel, r.commentId, r.body);
-      results.push({ commentId: r.commentId, ok: true });
-    } catch (err) {
-      results.push({ commentId: r.commentId, ok: false, error: String(err) });
-    }
-  }
+      return r.commentId;
+    }),
+  );
+
+  const results = settled.map((s, i) => ({
+    commentId: replies[i].commentId,
+    ok: s.status === "fulfilled",
+    ...(s.status === "rejected" ? { error: String(s.reason) } : {}),
+  }));
 
   res.json({ results });
 });
 
-// Request re-review from Greptile
-router.post("/:repo/:prNumber/re-review", (req, res) => {
-  const repoLabel = decodeURIComponent(req.params.repo);
-  const prNumber = parseInt(req.params.prNumber, 10);
-
-  const repo = getRepo(repoLabel);
-  if (!repo) {
-    res.status(404).json({ error: "Repo not configured" });
-    return;
-  }
-
-  try {
-    // Build summary from fixed comments — only include those fixed since the last re-review
-    const comments = getCommentsByPR(repoLabel, prNumber);
-    const prState = getPRState(repoLabel, prNumber);
-    const lastReReviewAt = prState?.lastReReviewAt ?? null;
-
-    const fixedComments = comments.filter((c) => {
-      if (c.status !== "fixed" || !c.fixResult) return false;
-      // Only include comments fixed after the last re-review
-      if (lastReReviewAt && c.fixResult.fixedAt <= lastReReviewAt) return false;
-      return true;
-    });
-
-    const allFixResults = prState?.fixResults ?? [];
-    const fixResults = lastReReviewAt
-      ? allFixResults.filter((r) => r.fixedAt > lastReReviewAt)
-      : allFixResults;
-
-    let body: string;
-    if (fixedComments.length > 0) {
-      const commitHashes = [...new Set(fixResults.map((r) => r.commitHash))];
-      const allFiles = [...new Set(fixResults.flatMap((r) => r.filesChanged))];
-
-      const addressedList = fixedComments.map((c) => {
-        const category = c.analysis?.category ?? "SHOULD_FIX";
-        const file = c.path ? `\`${c.path}\`` : "general";
-        const bodyText = c.body
-          .replace(/<[^>]*>/g, "")
-          .trim()
-          .split("\n")[0]
-          .slice(0, 100);
-        return `- **[${category}]** ${file}: ${bodyText}`;
-      });
-
-      body = `@greptileai Please re-review this PR.
-
-## Summary of Fixes
-
-${fixedComments.length} review comment${fixedComments.length !== 1 ? "s" : ""} addressed in ${commitHashes.length} commit${commitHashes.length !== 1 ? "s" : ""} (${commitHashes.join(", ")}).
-
-### Addressed Comments
-${addressedList.join("\n")}
-
-### Modified Files
-${allFiles.map((f) => `- \`${f}\``).join("\n")}
-
-Please include an updated **Confidence: X/5** score in your review.`;
-    } else {
-      body =
-        "@greptileai Please re-review this PR.\n\nPlease include an updated **Confidence: X/5** score in your review.";
-    }
-
-    postPRComment(repoLabel, prNumber, body);
-
-    const now = new Date().toISOString();
-    if (prState) {
-      upsertPRState({
-        ...prState,
-        phase: "re_review_requested",
-        lastReReviewAt: now,
-      });
-    }
-
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
+// Re-review requests are now handled via /api/reviews/:repo/:prNumber/request
+// with reviewerId: "greptile" (or "claude", "codex").
 
 // Get PR lifecycle status
 router.get("/:repo/:prNumber/status", (req, res) => {
@@ -555,13 +480,8 @@ router.get("/:repo/:prNumber/status", (req, res) => {
   const prState = getPRState(repoLabel, prNumber);
   const fixableCount = getFixableCount(repoLabel, prNumber);
 
-  // Fetch live confidence score
-  const confidenceScore = fetchConfidenceScore(repoLabel, prNumber);
-
-  // Update stored confidence if we got a fresh one
-  if (prState && confidenceScore !== null) {
-    upsertPRState({ ...prState, confidenceScore });
-  }
+  // Confidence scores now come from the reviews table via /api/reviews endpoints.
+  // The old prs.confidence_score column is no longer the source of truth.
 
   const fixProgress = getFixProgress(repoLabel, prNumber);
   const phase = prState?.phase ?? "polled";
@@ -575,10 +495,17 @@ router.get("/:repo/:prNumber/status", (req, res) => {
     }
   }
 
+  // Build a reviewScores map from the reviews table
+  const latestReviews = getLatestReviewPerReviewer(repoLabel, prNumber);
+  const reviewScores: Record<string, number | null> = {};
+  for (const r of latestReviews) {
+    reviewScores[r.reviewerId] = r.confidenceScore;
+  }
+
   res.json({
     phase,
     reviewCycle: prState?.reviewCycle ?? 0,
-    confidenceScore: confidenceScore ?? prState?.confidenceScore ?? null,
+    reviewScores,
     lastFixedAt: prState?.lastFixedAt ?? null,
     lastReReviewAt: prState?.lastReReviewAt ?? null,
     fixResults: prState?.fixResults ?? [],
@@ -593,9 +520,9 @@ router.get("/summary", (_req, res) => {
   res.json(getSummary());
 });
 
-// Get all active/recent jobs across all PRs
+// Get all activity: running/recent jobs + scheduled events
 router.get("/jobs", (_req, res) => {
-  res.json(getAllJobs());
+  res.json(getActivityFeed());
 });
 
 export default router;

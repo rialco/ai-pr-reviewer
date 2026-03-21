@@ -7,18 +7,36 @@ export interface JobStep {
   ts: string;
 }
 
+export type JobType = "analyze" | "fix" | "review" | "poll" | "sync" | "refresh" | "score_extract";
+
 export interface Job {
   id: string;
-  type: "analyze" | "fix";
+  type: JobType;
   repo: string;
-  prNumber: number;
+  prNumber?: number;
+  reviewerId?: string;
   status: "running" | "done" | "error";
   startedAt: string;
   finishedAt?: string;
   currentStep?: string;
+  detail?: string;
   commentCount?: number;
   steps: JobStep[];
   output: string[];
+}
+
+export interface ScheduledEvent {
+  id: string;
+  type: string;
+  description: string;
+  nextRunAt: string;
+  intervalMs: number;
+  lastRunAt: string | null;
+}
+
+export interface ActivityFeed {
+  jobs: Job[];
+  scheduled: ScheduledEvent[];
 }
 
 export function useJobs() {
@@ -27,14 +45,13 @@ export function useJobs() {
     queryFn: async () => {
       const res = await fetch("/api/prs/jobs");
       if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-      return res.json() as Promise<Job[]>;
+      return res.json() as Promise<ActivityFeed>;
     },
     refetchInterval: (query) => {
-      const data = query.state.data as Job[] | undefined;
-      // Poll fast when there are running jobs, slower otherwise
-      if (data?.some((j) => j.status === "running")) return 2000;
-      if (data && data.length > 0) return 5000;
-      return 15000;
+      const data = query.state.data as ActivityFeed | undefined;
+      if (data?.jobs.some((j) => j.status === "running")) return 2000;
+      if (data && data.jobs.length > 0) return 5000;
+      return 10000; // Still poll regularly so countdowns update
     },
   });
 }

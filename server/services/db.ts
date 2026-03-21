@@ -12,6 +12,7 @@ import type {
   CommentState,
 } from "../types.js";
 import { DEFAULT_BOT_USERS } from "../types.js";
+import type { Review, ReviewerId } from "../domain/review/types.js";
 
 const DB_PATH = path.join(import.meta.dirname, "../../data/pr-reviewer.db");
 
@@ -89,6 +90,23 @@ function migrate(db: Database.Database): void {
     );
 
     INSERT OR IGNORE INTO poll_state (id) VALUES (1);
+
+    CREATE TABLE IF NOT EXISTS reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repo TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      reviewer_id TEXT NOT NULL,
+      confidence_score REAL,
+      summary TEXT,
+      source TEXT NOT NULL DEFAULT 'local',
+      github_review_id TEXT,
+      raw_output TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (repo, pr_number, reviewer_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_reviews_pr ON reviews (repo, pr_number);
   `);
 
   // Add run_history column if missing
@@ -117,6 +135,38 @@ function migrate(db: Database.Database): void {
     db.exec("ALTER TABLE repos ADD COLUMN deleted_at TEXT");
   } catch {
     // Column already exists
+  }
+
+  // Migrate reviews table to have UNIQUE constraint on (repo, pr_number, reviewer_id).
+  // If the old table exists without the constraint, recreate it.
+  try {
+    // Check if the unique constraint exists by trying a conflicting insert
+    const hasConstraint = db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='reviews'",
+    ).get() as { sql: string } | undefined;
+    if (hasConstraint && !hasConstraint.sql.includes("UNIQUE")) {
+      db.exec("DROP TABLE reviews");
+      db.exec(`
+        CREATE TABLE reviews (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          repo TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          reviewer_id TEXT NOT NULL,
+          confidence_score REAL,
+          summary TEXT,
+          source TEXT NOT NULL DEFAULT 'local',
+          github_review_id TEXT,
+          raw_output TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (repo, pr_number, reviewer_id)
+        );
+        CREATE INDEX idx_reviews_pr ON reviews (repo, pr_number);
+      `);
+      console.log("Migrated reviews table to add UNIQUE constraint");
+    }
+  } catch {
+    // Table might not exist yet (handled by CREATE TABLE IF NOT EXISTS above)
   }
 }
 
@@ -284,6 +334,7 @@ export function hardRemoveRepo(label: string): void {
   const tx = db.transaction(() => {
     db.prepare("DELETE FROM comments WHERE repo = ?").run(label);
     db.prepare("DELETE FROM prs WHERE repo = ?").run(label);
+    db.prepare("DELETE FROM reviews WHERE repo = ?").run(label);
     db.prepare("DELETE FROM repos WHERE label = ?").run(label);
   });
   tx();
@@ -766,6 +817,8 @@ export function cleanupClosedPRComments(repo: string, openPRNumbers: number[]): 
     .run(repo, ...openPRNumbers);
   db.prepare(`DELETE FROM prs WHERE repo = ? AND pr_number NOT IN (${placeholders})`)
     .run(repo, ...openPRNumbers);
+  db.prepare(`DELETE FROM reviews WHERE repo = ? AND pr_number NOT IN (${placeholders})`)
+    .run(repo, ...openPRNumbers);
   return result.changes;
 }
 
@@ -781,4 +834,92 @@ export function getFixableCount(repo: string, prNumber: number): number {
     )
     .get(repo, prNumber) as { c: number };
   return row.c;
+}
+
+// ------- Reviews -------
+
+/**
+ * Upsert a review. If a review already exists for the same (repo, pr_number, reviewer_id),
+ * update it instead of creating a duplicate. This handles Greptile updating the same
+ * comment in-place with a new score.
+ */
+export function insertReview(review: Review): number {
+  const result = getDB()
+    .prepare(
+      `INSERT INTO reviews (repo, pr_number, reviewer_id, confidence_score, summary, source, github_review_id, raw_output, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (repo, pr_number, reviewer_id) DO UPDATE SET
+         confidence_score = COALESCE(excluded.confidence_score, confidence_score),
+         summary = CASE WHEN excluded.summary != '' THEN excluded.summary ELSE summary END,
+         github_review_id = COALESCE(excluded.github_review_id, github_review_id),
+         raw_output = CASE WHEN excluded.raw_output != '' THEN excluded.raw_output ELSE raw_output END,
+         updated_at = excluded.updated_at`,
+    )
+    .run(
+      review.repo,
+      review.prNumber,
+      review.reviewerId,
+      review.confidenceScore,
+      review.summary,
+      review.source,
+      review.githubReviewId,
+      review.rawOutput,
+      review.createdAt,
+      review.updatedAt,
+    );
+  return result.lastInsertRowid as number;
+}
+
+export function getReviewsByPR(repo: string, prNumber: number): Review[] {
+  const rows = getDB()
+    .prepare(
+      "SELECT * FROM reviews WHERE repo = ? AND pr_number = ? ORDER BY created_at DESC",
+    )
+    .all(repo, prNumber) as Array<Record<string, unknown>>;
+
+  return rows.map(rowToReview);
+}
+
+export function getLatestReview(
+  repo: string,
+  prNumber: number,
+  reviewerId: ReviewerId,
+): Review | null {
+  const row = getDB()
+    .prepare(
+      "SELECT * FROM reviews WHERE repo = ? AND pr_number = ? AND reviewer_id = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(repo, prNumber, reviewerId) as Record<string, unknown> | undefined;
+
+  return row ? rowToReview(row) : null;
+}
+
+export function getLatestReviewPerReviewer(
+  repo: string,
+  prNumber: number,
+): Review[] {
+  // With UNIQUE(repo, pr_number, reviewer_id), there's exactly one row per reviewer
+  const rows = getDB()
+    .prepare(
+      "SELECT * FROM reviews WHERE repo = ? AND pr_number = ?",
+    )
+    .all(repo, prNumber) as Array<Record<string, unknown>>;
+
+  return rows.map(rowToReview);
+}
+
+function rowToReview(row: Record<string, unknown>): Review {
+  return {
+    id: row.id as number,
+    repo: row.repo as string,
+    prNumber: row.pr_number as number,
+    reviewerId: row.reviewer_id as ReviewerId,
+    confidenceScore: row.confidence_score as number | null,
+    summary: row.summary as string | null,
+    source: row.source as "remote" | "local",
+    githubReviewId: row.github_review_id as string | null,
+    rawOutput: row.raw_output as string | null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
 }

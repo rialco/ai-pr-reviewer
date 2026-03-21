@@ -1,9 +1,10 @@
-import { usePRComments, useAnalyze, useDismiss, useReopen, useRecategorize, useFixComments, useRevertFix, useReplyToComments, useRequestReReview, usePRStatus, useRefreshPR, type EnrichedComment, type AnalysisProgressState, type FixProgress } from "../hooks/useApi";
+import { usePRComments, useAnalyze, useDismiss, useReopen, useRecategorize, useFixComments, useRevertFix, useReplyToComments, usePRStatus, useRefreshPR, type EnrichedComment, type AnalysisProgressState, type FixProgress } from "../hooks/useApi";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { MarkdownBody } from "./MarkdownBody";
 import { Card } from "./ui/card";
 import { ConfirmDialog } from "./ui/confirm-dialog";
+import { ReviewScoreboard } from "./ReviewScoreboard";
 import {
   Bot,
   FileCode,
@@ -111,25 +112,29 @@ function CommentCard({
           </div>
           <div className="flex items-center gap-1">
             {comment.status === "fix_failed" && onRetryFix && (
-              <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={onRetryFix} title="Retry fix">
-                <RotateCcw className="h-3.5 w-3.5" />
+              <Button variant="ghost" size="sm" className="h-7 px-2 shrink-0 text-[11px] active:scale-[0.94] transition-transform" onClick={onRetryFix} title="Retry the automated fix for this issue">
+                <RotateCcw className="h-3 w-3" />
+                Retry
               </Button>
             )}
             {comment.analysis && onReanalyze && comment.status !== "fixed" && comment.status !== "fixing" && (
-              <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={onReanalyze} title="Re-analyze">
-                <Sparkles className="h-3.5 w-3.5" />
+              <Button variant="ghost" size="sm" className="h-7 px-2 shrink-0 text-[11px] active:scale-[0.94] transition-transform" onClick={onReanalyze} title="Re-run AI analysis on this comment">
+                <Sparkles className="h-3 w-3" />
+                Analyze
               </Button>
             )}
             {onFix && comment.status !== "fixed" && comment.status !== "fixing" && (
-              <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={onFix} title="Fix this issue">
-                <Wrench className="h-3.5 w-3.5" />
+              <Button variant="ghost" size="sm" className="h-7 px-2 shrink-0 text-[11px] active:scale-[0.94] transition-transform" onClick={onFix} title="Auto-fix this issue in the code">
+                <Wrench className="h-3 w-3" />
+                Fix
               </Button>
             )}
             {comment.analysis && onRecategorize && comment.status !== "fixed" && comment.status !== "fixing" && (
               <select
-                className="h-7 text-[10px] rounded border border-border bg-background text-muted-foreground px-1 cursor-pointer hover:border-foreground/30"
+                className="h-7 text-[10px] rounded border border-border bg-background text-muted-foreground px-1.5 cursor-pointer hover:border-foreground/30 transition-colors"
                 value={comment.analysis.category}
                 onChange={(e) => onRecategorize(e.target.value)}
+                title="Change the severity category of this comment"
               >
                 <option value="MUST_FIX">Must Fix</option>
                 <option value="SHOULD_FIX">Should Fix</option>
@@ -139,13 +144,15 @@ function CommentCard({
               </select>
             )}
             {comment.status === "dismissed" && onReopen && (
-              <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={onReopen} title="Reopen">
-                <Undo2 className="h-3.5 w-3.5" />
+              <Button variant="ghost" size="sm" className="h-7 px-2 shrink-0 text-[11px] active:scale-[0.94] transition-transform" onClick={onReopen} title="Restore this dismissed comment">
+                <Undo2 className="h-3 w-3" />
+                Reopen
               </Button>
             )}
             {!comment.analysis && comment.status !== "dismissed" && comment.status !== "fixed" && (
-              <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={onDismiss} title="Dismiss">
-                <X className="h-3.5 w-3.5" />
+              <Button variant="ghost" size="sm" className="h-7 px-2 shrink-0 text-[11px] active:scale-[0.94] transition-transform" onClick={onDismiss} title="Dismiss this comment as not actionable">
+                <X className="h-3 w-3" />
+                Dismiss
               </Button>
             )}
           </div>
@@ -221,52 +228,101 @@ function CommentCard({
   );
 }
 
+type SectionColor = "must_fix" | "should_fix" | "nice_to_have" | "dismiss" | "already_addressed" | "fixing" | "fixed" | "fix_failed" | "muted";
+
+const sectionColorMap: Record<SectionColor, string> = {
+  must_fix:          "bg-must-fix",
+  should_fix:        "bg-should-fix",
+  nice_to_have:      "bg-nice-to-have",
+  dismiss:           "bg-dismiss",
+  already_addressed: "bg-already-addressed",
+  fixing:            "bg-fixing",
+  fixed:             "bg-fixed",
+  fix_failed:        "bg-fix-failed",
+  muted:             "bg-muted-foreground/40",
+};
+
 function CollapsibleSection({
   title,
   count,
   badge,
   action,
+  color,
   defaultOpen = true,
   opacity,
+  embedded,
   children,
 }: {
   title: string;
   count: number;
   badge?: React.ReactNode;
   action?: React.ReactNode;
+  color?: SectionColor;
   defaultOpen?: boolean;
   opacity?: string;
+  embedded?: boolean;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
 
   if (count === 0) return null;
 
+  const pip = color ? sectionColorMap[color] : null;
+
   return (
-    <div>
-      <div className="flex items-center justify-between mb-2">
-        <button
-          onClick={() => setOpen(!open)}
-          className="flex items-center gap-1.5 text-left group"
-        >
-          {open ? (
-            <ChevronDown className="h-3 w-3 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="h-3 w-3 text-muted-foreground" />
-          )}
-          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            {title}
-          </h3>
-          <span className="text-xs text-muted-foreground/70">({count})</span>
-          {badge}
-        </button>
-        {open && action}
+    <div className={embedded ? "" : "rounded-lg border border-border overflow-hidden"}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen(!open)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(!open); } }}
+        className={[
+          "flex items-center gap-2.5 px-3 cursor-pointer select-none",
+          embedded ? "h-[34px]" : "h-[40px]",
+          "transition-colors duration-100",
+          "hover:bg-white/[0.04] active:bg-white/[0.06]",
+          open ? "bg-white/[0.02]" : "",
+        ].join(" ")}
+      >
+        {/* Color pip */}
+        {pip && <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${pip}`} />}
+
+        <span className={`font-semibold tracking-wide uppercase text-muted-foreground ${embedded ? "text-[10px]" : "text-[11px]"}`}>
+          {title}
+        </span>
+        <span className={`tabular-nums text-muted-foreground/50 ${embedded ? "text-[10px]" : "text-[11px]"}`}>
+          {count}
+        </span>
+
+        {badge && <span className="ml-0.5">{badge}</span>}
+
+        {/* Chevron */}
+        <ChevronRight
+          className={[
+            "h-3 w-3 ml-auto text-muted-foreground/40 transition-transform duration-200 ease-out",
+            open ? "rotate-90" : "",
+          ].join(" ")}
+        />
+
+        {/* Action buttons — stop click propagation so they don't toggle */}
+        {action && (
+          <span onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} className="ml-1">
+            {action}
+          </span>
+        )}
       </div>
-      {open && (
-        <div className={`space-y-2 ${opacity ?? ""}`}>
-          {children}
+
+      {/* Animated content with CSS grid trick */}
+      <div
+        className="grid transition-[grid-template-rows] duration-200 ease-out"
+        style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
+      >
+        <div className="overflow-hidden">
+          <div className={`p-2 space-y-2 ${opacity ?? ""}`}>
+            {children}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -345,77 +401,169 @@ function AnalysisProgressPanel({ progress }: { progress: AnalysisProgressState }
   );
 }
 
-function FixProgressPanel({ progress, collapsed: initialCollapsed }: { progress: FixProgress; collapsed?: boolean }) {
+function FixProgressPanel({ progress, collapsed: initialCollapsed, embedded }: { progress: FixProgress; collapsed?: boolean; embedded?: boolean }) {
   const hasError = progress.steps.some((s) => s.status === "error");
   const allDone = progress.steps.every((s) => s.status === "done");
   const [collapsed, setCollapsed] = useState(initialCollapsed ?? false);
 
-  const borderClass = hasError ? "border-destructive/30 bg-destructive/5" : "border-orange-500/20 bg-orange-500/5";
+  const statusPip = hasError ? "bg-fix-failed" : allDone ? "bg-fixed" : "bg-fixing";
 
   return (
-    <Card className={`overflow-hidden ${borderClass}`}>
-      <div className="p-4">
-        <button
-          className="flex items-center gap-2 w-full text-left"
-          onClick={() => setCollapsed(!collapsed)}
-        >
-          {allDone ? (
-            <Check className="h-4 w-4 text-green-500 shrink-0" />
-          ) : hasError ? (
-            <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
-          ) : (
-            <Loader2 className="h-4 w-4 animate-spin text-orange-500 shrink-0" />
-          )}
-          <span className="text-sm font-medium">
-            {hasError ? "Fix Failed" : allDone ? "Fix Complete" : "Fixing Issues"}
-          </span>
-          <span className="text-xs text-muted-foreground ml-auto">
-            {new Date(progress.startedAt).toLocaleTimeString()}
-            {progress.finishedAt && ` — ${new Date(progress.finishedAt).toLocaleTimeString()}`}
-          </span>
-          {collapsed ? (
-            <ChevronRight className="h-3 w-3 text-muted-foreground shrink-0" />
-          ) : (
-            <ChevronDown className="h-3 w-3 text-muted-foreground shrink-0" />
-          )}
-        </button>
+    <div className={embedded ? "" : "rounded-lg border border-border overflow-hidden"}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setCollapsed(!collapsed)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setCollapsed(!collapsed); } }}
+        className={[
+          "flex items-center gap-2.5 px-3 h-[40px] cursor-pointer select-none",
+          "transition-colors duration-100",
+          "hover:bg-white/[0.04] active:bg-white/[0.06]",
+          !collapsed ? "bg-white/[0.02]" : "",
+        ].join(" ")}
+      >
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusPip}`} />
 
-        {!collapsed && (
-          <>
-            <div className="space-y-1.5 mt-3">
-              {progress.steps.map((step, i) => (
-                <div key={i} className="flex items-start gap-2 text-xs">
-                  {step.status === "done" ? (
-                    <Check className="h-3.5 w-3.5 text-green-500 shrink-0 mt-0.5" />
-                  ) : step.status === "error" ? (
-                    <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0 mt-0.5" />
-                  ) : (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-orange-500 shrink-0 mt-0.5" />
+        {!allDone && !hasError && (
+          <Loader2 className="h-3 w-3 animate-spin text-fixing shrink-0" />
+        )}
+
+        <span className="text-[11px] font-semibold tracking-wide uppercase text-muted-foreground">
+          {hasError ? "Fix Failed" : allDone ? "Fix Complete" : "Fixing Issues"}
+        </span>
+
+        <span className="text-[10px] text-muted-foreground/50 ml-auto">
+          {new Date(progress.startedAt).toLocaleTimeString()}
+          {progress.finishedAt && ` — ${new Date(progress.finishedAt).toLocaleTimeString()}`}
+        </span>
+
+        <ChevronRight
+          className={[
+            "h-3 w-3 text-muted-foreground/40 transition-transform duration-200 ease-out",
+            !collapsed ? "rotate-90" : "",
+          ].join(" ")}
+        />
+      </div>
+
+      <div
+        className="grid transition-[grid-template-rows] duration-200 ease-out"
+        style={{ gridTemplateRows: collapsed ? "0fr" : "1fr" }}
+      >
+        <div className="overflow-hidden">
+          <div className="px-3 py-2 space-y-1.5">
+            {progress.steps.map((step, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                {step.status === "done" ? (
+                  <Check className="h-3.5 w-3.5 text-green-500 shrink-0 mt-0.5" />
+                ) : step.status === "error" ? (
+                  <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0 mt-0.5" />
+                ) : (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-orange-500 shrink-0 mt-0.5" />
+                )}
+                <div className="min-w-0">
+                  <span className={
+                    step.status === "done" ? "text-muted-foreground" :
+                    step.status === "error" ? "text-destructive font-medium" :
+                    "text-foreground font-medium"
+                  }>
+                    {step.step}
+                  </span>
+                  {step.detail && (
+                    <p className={`mt-0.5 ${step.status === "error" ? "text-destructive/80" : "text-muted-foreground"}`}>
+                      {step.detail}
+                    </p>
                   )}
-                  <div className="min-w-0">
-                    <span className={
-                      step.status === "done" ? "text-muted-foreground" :
-                      step.status === "error" ? "text-destructive font-medium" :
-                      "text-foreground font-medium"
-                    }>
-                      {step.step}
-                    </span>
-                    {step.detail && (
-                      <p className={`mt-0.5 ${step.status === "error" ? "text-destructive/80" : "text-muted-foreground"}`}>
-                        {step.detail}
-                      </p>
-                    )}
-                  </div>
                 </div>
-              ))}
-            </div>
+              </div>
+            ))}
 
             {/* Claude output */}
             <OutputLog lines={progress.output} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FixCyclesPanel({ phase, reviewCycle, lastFixedAt, current, history }: {
+  phase: string;
+  reviewCycle: number;
+  lastFixedAt: string | null;
+  current: FixProgress | null;
+  history: FixProgress[];
+}) {
+  const runs = [
+    ...(current ? [current] : []),
+    ...[...history].reverse(),
+  ];
+  const [open, setOpen] = useState(!!current);
+
+  return (
+    <div className="rounded-lg border border-border overflow-hidden">
+      {/* Status header */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => runs.length > 0 && setOpen(!open)}
+        onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && runs.length > 0) { e.preventDefault(); setOpen(!open); } }}
+        className={[
+          "flex items-center gap-3 px-3 h-[40px] select-none",
+          runs.length > 0 ? "cursor-pointer hover:bg-white/[0.04] active:bg-white/[0.06]" : "",
+          "transition-colors duration-100",
+          open ? "bg-white/[0.02]" : "",
+        ].join(" ")}
+      >
+        <Badge variant={phaseVariant[phase] ?? "outline"}>
+          {phaseLabel[phase] ?? phase}
+        </Badge>
+        {reviewCycle > 0 && (
+          <span className="text-xs text-muted-foreground">
+            Cycle #{reviewCycle}
+          </span>
+        )}
+        {lastFixedAt && (
+          <span className="text-xs text-muted-foreground ml-auto">
+            Last fixed: {new Date(lastFixedAt).toLocaleString()}
+          </span>
+        )}
+        {runs.length > 0 && (
+          <>
+            {!lastFixedAt && <span className="ml-auto" />}
+            <span className="text-[11px] tabular-nums text-muted-foreground/50">
+              {runs.length} run{runs.length !== 1 ? "s" : ""}
+            </span>
+            <ChevronRight
+              className={[
+                "h-3 w-3 text-muted-foreground/40 transition-transform duration-200 ease-out",
+                open ? "rotate-90" : "",
+              ].join(" ")}
+            />
           </>
         )}
       </div>
-    </Card>
+
+      {/* Expandable run list */}
+      {runs.length > 0 && (
+        <div
+          className="grid transition-[grid-template-rows] duration-200 ease-out"
+          style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
+        >
+          <div className="overflow-hidden">
+            <div className="divide-y divide-border border-t border-border">
+              {runs.map((run, i) => (
+                <FixProgressPanel
+                  key={run.startedAt}
+                  progress={run}
+                  collapsed={i > 0}
+                  embedded
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -429,45 +577,65 @@ function FixedCommitGroup({ hash, comments, onRevert, revertPending }: {
   const allReplied = comments.every((c) => c.repliedAt || c.type !== "inline");
 
   return (
-    <div className="space-y-2 border border-border/50 rounded-md p-2">
-      <div className="flex items-center justify-between">
-        <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 text-left">
-          {open ? (
-            <ChevronDown className="h-3 w-3 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="h-3 w-3 text-muted-foreground" />
-          )}
-          <span className="text-[10px] font-mono text-muted-foreground">
-            {hash}
-          </span>
-          <span className="text-[10px] text-muted-foreground">
-            — {comments.length} comment{comments.length !== 1 ? "s" : ""}
-          </span>
-          {allReplied && (
-            <Badge variant="fixed" className="text-[9px] h-4 px-1">
-              <Check className="h-2.5 w-2.5 mr-0.5" />
-              replied
-            </Badge>
-          )}
-        </button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-5 text-[10px] px-2"
-          onClick={onRevert}
-          disabled={revertPending}
-        >
-          <Undo2 className="h-2.5 w-2.5" />
-          Revert
-        </Button>
+    <div className="rounded-lg border border-border overflow-hidden">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen(!open)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(!open); } }}
+        className={[
+          "flex items-center gap-2.5 px-3 h-[40px] cursor-pointer select-none",
+          "transition-colors duration-100",
+          "hover:bg-white/[0.04] active:bg-white/[0.06]",
+          open ? "bg-white/[0.02]" : "",
+        ].join(" ")}
+      >
+        <span className="text-[10px] font-mono text-muted-foreground">
+          {hash}
+        </span>
+        <span className="text-[10px] text-muted-foreground">
+          — {comments.length} comment{comments.length !== 1 ? "s" : ""}
+        </span>
+        {allReplied && (
+          <Badge variant="fixed" className="text-[9px] h-4 px-1">
+            <Check className="h-2.5 w-2.5 mr-0.5" />
+            replied
+          </Badge>
+        )}
+
+        <ChevronRight
+          className={[
+            "h-3 w-3 ml-auto text-muted-foreground/40 transition-transform duration-200 ease-out",
+            open ? "rotate-90" : "",
+          ].join(" ")}
+        />
+
+        <span onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-5 text-[10px] px-2"
+            onClick={onRevert}
+            disabled={revertPending}
+          >
+            <Undo2 className="h-2.5 w-2.5" />
+            Revert
+          </Button>
+        </span>
       </div>
-      {open && (
-        <div className="space-y-2">
-          {comments.map((c) => (
-            <CommentCard key={c.id} comment={c} onDismiss={() => {}} />
-          ))}
+
+      <div
+        className="grid transition-[grid-template-rows] duration-200 ease-out"
+        style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
+      >
+        <div className="overflow-hidden">
+          <div className="p-2 space-y-2">
+            {comments.map((c) => (
+              <CommentCard key={c.id} comment={c} onDismiss={() => {}} />
+            ))}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -497,7 +665,6 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
   const fixMutation = useFixComments();
   const revertFix = useRevertFix();
   const replyToComments = useReplyToComments();
-  const requestReReview = useRequestReReview();
   const refreshPR = useRefreshPR();
   const { data: prStatus } = usePRStatus(repo, prNumber);
   const [revertHash, setRevertHash] = useState<string | null>(null);
@@ -578,28 +745,23 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
 
   return (
     <div className="space-y-4">
-      {/* PR Status Banner */}
+      {/* Review Scoreboard */}
+      <ReviewScoreboard repo={repo} prNumber={prNumber} />
+
+      {/* Analysis progress panel (scoped to this PR) */}
+      {analyze.progressFor(repo, prNumber) && (
+        <AnalysisProgressPanel progress={analyze.progressFor(repo, prNumber)!} />
+      )}
+
+      {/* PR status + fix cycles */}
       {prStatus && prStatus.phase !== "polled" && (
-        <div className="flex items-center gap-3 rounded-md bg-muted/50 px-4 py-2.5 border border-border">
-          <Badge variant={phaseVariant[prStatus.phase] ?? "outline"}>
-            {phaseLabel[prStatus.phase] ?? prStatus.phase}
-          </Badge>
-          {prStatus.reviewCycle > 0 && (
-            <span className="text-xs text-muted-foreground">
-              Cycle #{prStatus.reviewCycle}
-            </span>
-          )}
-          {prStatus.confidenceScore !== null && (
-            <Badge variant={prStatus.confidenceScore >= 4 ? "confidence_high" : "confidence_low"}>
-              {prStatus.confidenceScore}/5
-            </Badge>
-          )}
-          {prStatus.lastFixedAt && (
-            <span className="text-xs text-muted-foreground ml-auto">
-              Last fixed: {new Date(prStatus.lastFixedAt).toLocaleString()}
-            </span>
-          )}
-        </div>
+        <FixCyclesPanel
+          phase={prStatus.phase}
+          reviewCycle={prStatus.reviewCycle}
+          lastFixedAt={prStatus.lastFixedAt}
+          current={prStatus.fixProgress}
+          history={prStatus.fixHistory ?? []}
+        />
       )}
 
       {/* Actions bar */}
@@ -641,21 +803,25 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
           <Button
             variant="secondary"
             size="sm"
+            className="active:scale-[0.96] transition-transform"
             onClick={() => refreshPR.mutate({ repo, prNumber }, { onSuccess: () => refetch() })}
             disabled={refreshPR.isPending}
+            title="Sync latest comments from GitHub"
           >
             {refreshPR.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <RefreshCw className="h-3.5 w-3.5" />
             )}
-            Refresh
+            {refreshPR.isPending ? "Syncing..." : "Sync Comments"}
           </Button>
           {unanalyzed.length > 0 ? (
             <Button
               size="sm"
+              className="active:scale-[0.96] transition-transform"
               onClick={() => analyze.mutate({ repo, prNumber })}
               disabled={analyze.isPending}
+              title="Run AI analysis to categorize unreviewed comments"
             >
               {analyze.isPending ? (
                 <>
@@ -673,6 +839,7 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
             <Button
               variant="secondary"
               size="sm"
+              className="active:scale-[0.96] transition-transform"
               onClick={() =>
                 analyze.mutate({
                   repo,
@@ -681,6 +848,7 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
                 })
               }
               disabled={analyze.isPending}
+              title="Re-run analysis on previously categorized comments"
             >
               {analyze.isPending ? (
                 <>
@@ -690,7 +858,7 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
               ) : (
                 <>
                   <RotateCcw className="h-3.5 w-3.5" />
-                  Re-analyze All ({analyzedNotActioned.length})
+                  Re-analyze ({analyzedNotActioned.length})
                 </>
               )}
             </Button>
@@ -698,8 +866,10 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
           {fixableCount > 0 && (
             <Button
               size="sm"
+              className="active:scale-[0.96] transition-transform"
               onClick={() => fixMutation.mutate({ repo, prNumber })}
               disabled={isFixing}
+              title="Auto-fix all actionable issues in the codebase"
             >
               {isFixing ? (
                 <>
@@ -714,47 +884,8 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
               )}
             </Button>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => requestReReview.mutate({ repo, prNumber })}
-            disabled={requestReReview.isPending}
-          >
-            {requestReReview.isPending ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            Re-review
-          </Button>
         </div>
       </div>
-
-      {/* Analysis progress panel (scoped to this PR) */}
-      {analyze.progressFor(repo, prNumber) && (
-        <AnalysisProgressPanel progress={analyze.progressFor(repo, prNumber)!} />
-      )}
-
-      {/* Fix progress panel */}
-      {prStatus?.fixProgress && (
-        <FixProgressPanel progress={prStatus.fixProgress} />
-      )}
-
-      {/* Run history */}
-      {prStatus?.fixHistory && prStatus.fixHistory.length > 0 && (
-        <CollapsibleSection
-          title="Run History"
-          count={prStatus.fixHistory.length}
-          defaultOpen={false}
-          badge={<History className="h-3 w-3 text-muted-foreground ml-1" />}
-        >
-          <div className="space-y-2">
-            {[...prStatus.fixHistory].reverse().map((run, i) => (
-              <FixProgressPanel key={run.startedAt} progress={run} collapsed />
-            ))}
-          </div>
-        </CollapsibleSection>
-      )}
 
       {groupBy === "reviewer" ? (
         /* ---- Group by Reviewer view ---- */
@@ -797,64 +928,89 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
       ) : (
         /* ---- Group by Category view (default) ---- */
         <>
-      {/* Fixing */}
-      <CollapsibleSection title="Fixing" count={fixingComments.length}>
-        {fixingComments.map((c) => renderCard(c))}
-      </CollapsibleSection>
-
-      {/* Must Fix */}
+      {/* Analyzed — parent group with nested sub-categories */}
       <CollapsibleSection
-        title="Must Fix"
-        count={mustFix.length}
-        badge={<Badge variant="must_fix" className="ml-1">{mustFix.length}</Badge>}
-      >
-        {mustFix.map((c) => renderCard(c))}
-      </CollapsibleSection>
-
-      {/* Should Fix */}
-      <CollapsibleSection
-        title="Should Fix"
-        count={shouldFix.length}
-        badge={<Badge variant="should_fix" className="ml-1">{shouldFix.length}</Badge>}
-      >
-        {shouldFix.map((c) => renderCard(c))}
-      </CollapsibleSection>
-
-      {/* Nice to Have */}
-      <CollapsibleSection
-        title="Nice to Have"
-        count={niceToHave.length}
-        defaultOpen={false}
-        badge={<Badge variant="nice_to_have" className="ml-1">{niceToHave.length}</Badge>}
-        action={
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-6 text-xs px-2"
-            onClick={() => fixMutation.mutate({ repo, prNumber, commentIds: niceToHave.map((c) => c.id) })}
-            disabled={isFixing}
-          >
-            <Wrench className="h-3 w-3" />
-            Fix All ({niceToHave.length})
-          </Button>
+        title="Analyzed"
+        count={analyzedNotActioned.length + fixingComments.length + fixFailedComments.length}
+        color="must_fix"
+        badge={
+          <span className="flex gap-1 ml-1">
+            {mustFix.length > 0 && <Badge variant="must_fix">{mustFix.length} must fix</Badge>}
+            {shouldFix.length > 0 && <Badge variant="should_fix">{shouldFix.length} should fix</Badge>}
+            {fixFailedComments.length > 0 && <Badge variant="fix_failed">{fixFailedComments.length} failed</Badge>}
+          </span>
         }
       >
-        {niceToHave.map((c) => renderCard(c, {
-          onFix: () => fixMutation.mutate({ repo, prNumber, commentIds: [c.id] }),
-        }))}
-      </CollapsibleSection>
+        <CollapsibleSection title="Fixing" count={fixingComments.length} color="fixing" embedded>
+          {fixingComments.map((c) => renderCard(c))}
+        </CollapsibleSection>
 
-      {/* Fix Failed */}
-      <CollapsibleSection title="Fix Failed" count={fixFailedComments.length}>
-        {fixFailedComments.map((c) =>
-          renderCard(c, {
-            onRetryFix: () => fixMutation.mutate({ repo, prNumber, commentIds: [c.id] }),
-          }),
-        )}
+        <CollapsibleSection title="Must Fix" count={mustFix.length} color="must_fix" embedded>
+          {mustFix.map((c) => renderCard(c))}
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Should Fix" count={shouldFix.length} color="should_fix" embedded>
+          {shouldFix.map((c) => renderCard(c))}
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          title="Nice to Have"
+          count={niceToHave.length}
+          defaultOpen={false}
+          color="nice_to_have"
+          embedded
+          action={
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 text-xs px-2"
+              onClick={() => fixMutation.mutate({ repo, prNumber, commentIds: niceToHave.map((c) => c.id) })}
+              disabled={isFixing}
+            >
+              <Wrench className="h-3 w-3" />
+              Fix All ({niceToHave.length})
+            </Button>
+          }
+        >
+          {niceToHave.map((c) => renderCard(c, {
+            onFix: () => fixMutation.mutate({ repo, prNumber, commentIds: [c.id] }),
+          }))}
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Fix Failed" count={fixFailedComments.length} color="fix_failed" embedded>
+          {fixFailedComments.map((c) =>
+            renderCard(c, {
+              onRetryFix: () => fixMutation.mutate({ repo, prNumber, commentIds: [c.id] }),
+            }),
+          )}
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          title="Already Addressed"
+          count={alreadyAddressed.length}
+          defaultOpen={false}
+          color="already_addressed"
+          opacity="opacity-75"
+          embedded
+        >
+          {alreadyAddressed.map((c) => renderCard(c))}
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          title="Dismissed by Analysis"
+          count={dismissedByAnalysis.length}
+          defaultOpen={false}
+          color="dismiss"
+          opacity="opacity-75"
+          embedded
+        >
+          {dismissedByAnalysis.map((c) => renderCard(c))}
+        </CollapsibleSection>
+
       </CollapsibleSection>
 
       {/* Pending Analysis */}
-      <CollapsibleSection title="Pending Analysis" count={unanalyzed.length}>
+      <CollapsibleSection title="Pending Analysis" count={unanalyzed.length} color="muted">
         {unanalyzed.map((c) => renderCard(c))}
       </CollapsibleSection>
 
@@ -863,7 +1019,17 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
         title="Fixed"
         count={fixedComments.length}
         defaultOpen={false}
-        opacity="opacity-75"
+        color="fixed"
+        badge={(() => {
+          const unreplied = fixedComments.filter((c) => c.type === "inline" && !c.repliedAt).length;
+          if (unreplied === 0) return undefined;
+          return (
+            <Badge variant="should_fix" className="text-[9px] h-4 px-1.5">
+              <MessageSquareReply className="h-2.5 w-2.5 mr-0.5" />
+              {unreplied} unreplied
+            </Badge>
+          );
+        })()}
         action={
           fixedComments.some((c) => c.type === "inline") ? (() => {
             const unrepliedCount = fixedComments.filter((c) => c.type === "inline" && !c.repliedAt).length;
@@ -981,31 +1147,12 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
         })()}
       </CollapsibleSection>
 
-      {/* Already Addressed */}
-      <CollapsibleSection
-        title="Already Addressed"
-        count={alreadyAddressed.length}
-        defaultOpen={false}
-        opacity="opacity-75"
-      >
-        {alreadyAddressed.map((c) => renderCard(c))}
-      </CollapsibleSection>
-
-      {/* Dismissed by Analysis */}
-      <CollapsibleSection
-        title="Dismissed by Analysis"
-        count={dismissedByAnalysis.length}
-        defaultOpen={false}
-        opacity="opacity-75"
-      >
-        {dismissedByAnalysis.map((c) => renderCard(c))}
-      </CollapsibleSection>
-
       {/* Manually Dismissed */}
       <CollapsibleSection
         title="Dismissed"
         count={dismissed.length}
         defaultOpen={false}
+        color="dismiss"
         opacity="opacity-60"
       >
         {dismissed.map((c) => (

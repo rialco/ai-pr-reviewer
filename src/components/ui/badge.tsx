@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 
 interface BadgeProps {
   children: React.ReactNode;
-  variant?: "default" | "must_fix" | "should_fix" | "nice_to_have" | "dismiss" | "already_addressed" | "fixing" | "fixed" | "fix_failed" | "confidence_high" | "confidence_low" | "outline";
+  variant?: "default" | "must_fix" | "should_fix" | "nice_to_have" | "dismiss" | "already_addressed" | "fixing" | "fixed" | "fix_failed" | "confidence_high" | "confidence_low" | "confidence_danger" | "outline";
   className?: string;
 }
 
@@ -18,6 +18,7 @@ const variantStyles: Record<string, string> = {
   fix_failed: "bg-fix-failed/15 text-fix-failed border-fix-failed/20",
   confidence_high: "bg-confidence-high/15 text-confidence-high border-confidence-high/20",
   confidence_low: "bg-confidence-low/15 text-confidence-low border-confidence-low/20",
+  confidence_danger: "bg-confidence-danger/15 text-confidence-danger border-confidence-danger/20",
   outline: "border-border text-muted-foreground",
 };
 

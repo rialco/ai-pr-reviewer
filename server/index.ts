@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import repoRoutes from "./routes/repos.js";
 import prRoutes from "./routes/prs.js";
+import reviewRoutes from "./routes/reviews.js";
 import { getDB, migrateFromJson, resetStaleFixing } from "./services/db.js";
 import { startBackgroundPoller } from "./services/poller.js";
 
@@ -18,6 +19,7 @@ app.use(express.json());
 
 app.use("/api/repos", repoRoutes);
 app.use("/api/prs", prRoutes);
+app.use("/api/reviews", reviewRoutes);
 
 app.listen(PORT, () => {
   console.log(`PR Review server running on http://localhost:${PORT}`);

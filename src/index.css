@@ -34,10 +34,20 @@
   --color-fix-failed: #ef4444;
   --color-confidence-high: #22c55e;
   --color-confidence-low: #f59e0b;
+  --color-confidence-danger: #ef4444;
 }
 
 body {
   background-color: var(--color-background);
   color: var(--color-foreground);
   font-family: system-ui, -apple-system, sans-serif;
+}
+
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 8px 0 var(--breathe-color, rgba(109, 91, 247, 0.15)); }
+  50% { box-shadow: 0 0 20px 4px var(--breathe-color, rgba(109, 91, 247, 0.35)); }
+}
+
+.animate-breathe {
+  animation: breathe 2s ease-in-out infinite;
 }

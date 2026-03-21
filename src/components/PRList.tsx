@@ -14,28 +14,42 @@ const phaseColor: Record<string, string> = {
 
 function PRStatusIndicator({ repo, prNumber }: { repo: string; prNumber: number }) {
   const { data: status } = usePRStatus(repo, prNumber);
-  if (!status || (status.phase === "polled" && status.reviewCycle === 0 && status.confidenceScore === null)) {
+  const scores = status?.reviewScores ?? {};
+  const hasScores = Object.values(scores).some((s) => s !== null);
+
+  if (!status || (status.phase === "polled" && status.reviewCycle === 0 && !hasScores)) {
     return null;
   }
 
   return (
-    <div className="flex items-center gap-1.5">
-      {status.phase !== "polled" && (
-        <span
-          className={`h-2 w-2 rounded-full ${phaseColor[status.phase] ?? "bg-muted-foreground"}`}
-          title={status.phase}
-        />
-      )}
-      {status.confidenceScore !== null && (
-        <Badge variant={status.confidenceScore >= 4 ? "confidence_high" : "confidence_low"} className="text-[10px] px-1 py-0">
-          {status.confidenceScore}/5
-        </Badge>
-      )}
-      {status.reviewCycle > 0 && (
-        <span className="text-[10px] text-muted-foreground">
-          C{status.reviewCycle}
-        </span>
-      )}
+    <div className="flex items-center justify-between mt-1">
+      <div className="flex items-center gap-1.5">
+        {Object.entries(scores).map(([reviewerId, score]) =>
+          score !== null ? (
+            <span key={reviewerId} title={reviewerId}>
+              <Badge
+                variant={score >= 4 ? "confidence_high" : score >= 3 ? "confidence_low" : "confidence_danger"}
+                className="text-[10px] px-1 py-0"
+              >
+                {score}/5
+              </Badge>
+            </span>
+          ) : null,
+        )}
+      </div>
+      <div className="flex items-center gap-1.5">
+        {status.phase !== "polled" && (
+          <span
+            className={`h-2 w-2 rounded-full ${phaseColor[status.phase] ?? "bg-muted-foreground"}`}
+            title={status.phase}
+          />
+        )}
+        {status.reviewCycle > 0 && (
+          <span className="text-[10px] text-muted-foreground">
+            C{status.reviewCycle}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -98,8 +112,8 @@ export function PRList({ onSelectPR, selectedPR }: PRListProps) {
                         <span className="text-xs text-muted-foreground">
                           {pr.headRefName}
                         </span>
-                        <PRStatusIndicator repo={pr.repo} prNumber={pr.number} />
                       </div>
+                      <PRStatusIndicator repo={pr.repo} prNumber={pr.number} />
                     </div>
                     <a
                       href={pr.url}

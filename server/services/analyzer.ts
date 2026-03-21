@@ -156,7 +156,7 @@ export async function analyzeComments(
       message: "Fetching PR branch info...",
       progress: 5,
     });
-    const branch = getPRBranch(repoLabel, prNumber);
+    const branch = await getPRBranch(repoLabel, prNumber);
 
     // Step 2: Fetch PR diff for full cross-file context
     emit({
@@ -165,7 +165,7 @@ export async function analyzeComments(
       message: "Fetching full PR diff for cross-file context...",
       progress: 15,
     });
-    const prDiff = getPRDiff(repoLabel, prNumber);
+    const prDiff = await getPRDiff(repoLabel, prNumber, repo.localPath, branch ?? undefined);
 
     // Step 3: Set up a read-only local worktree so Claude can explore the full codebase.
     // Unlike the fixer's getWorkDir, we do NOT symlink node_modules or strip hooks —

@@ -1,8 +1,38 @@
-import { execSync } from "child_process";
+import { exec, spawn } from "child_process";
+import { promisify } from "util";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import type { PRInfo, BotComment, RepoConfig } from "../types.js";
 
-function gh(args: string): string {
-  return execSync(`gh ${args}`, { encoding: "utf-8", timeout: 30000 });
+const execAsync = promisify(exec);
+
+/** Run a gh command that needs stdin input (e.g. posting comment bodies). */
+function ghWithInput(args: string, input: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("gh", args.split(/\s+/), {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 30000,
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) reject(new Error(`gh exited ${code}: ${stderr}`));
+      else resolve();
+    });
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
+async function gh(args: string, options?: { input?: string }): Promise<string> {
+  const { stdout } = await execAsync(`gh ${args}`, {
+    encoding: "utf-8",
+    timeout: 30000,
+    ...(options?.input ? { input: options.input } : {}),
+  });
+  return stdout;
 }
 
 /** Parse NDJSON output (one JSON object per line) into an array. */
@@ -20,9 +50,9 @@ function parseNDJSON<T>(raw: string): T[] {
   return results;
 }
 
-export function listOpenPRs(repo: RepoConfig): PRInfo[] {
+export async function listOpenPRs(repo: RepoConfig): Promise<PRInfo[]> {
   try {
-    const raw = gh(
+    const raw = await gh(
       `pr list --repo ${repo.label} --author @me --state open --json number,title,url,headRefName,author,createdAt,updatedAt`,
     );
     const prs = JSON.parse(raw) as Array<{
@@ -49,20 +79,36 @@ export function listOpenPRs(repo: RepoConfig): PRInfo[] {
   }
 }
 
-export function fetchBotComments(
+export async function fetchBotComments(
   repo: RepoConfig,
   prNumber: number,
   prTitle: string,
   prUrl: string,
-): BotComment[] {
+): Promise<BotComment[]> {
   const botFilter = repo.botUsers
     .map((b) => `.user.login == "${b}"`)
     .join(" or ");
 
+  // Run all 3 API calls in parallel
+  const [inlineResult, reviewResult, issueResult] = await Promise.allSettled([
+    // 1. Inline review comments
+    gh(
+      `api repos/${repo.label}/pulls/${prNumber}/comments --paginate --jq '.[] | {id, in_reply_to_id, user: .user.login, path, line: (.line // .original_line), diff_hunk, body, created_at, url}'`,
+    ),
+    // 2. Review-level comments
+    gh(
+      `api repos/${repo.label}/pulls/${prNumber}/reviews --paginate --jq '.[] | select(${botFilter}) | select(.body != "") | {id, body, user: .user.login, state, submitted_at}'`,
+    ),
+    // 3. Issue-level comments (PR conversation)
+    gh(
+      `api repos/${repo.label}/issues/${prNumber}/comments --paginate --jq '.[] | select(${botFilter}) | {id, body, user: .user.login, created_at, url}'`,
+    ),
+  ]);
+
   const comments: BotComment[] = [];
 
-  // 1. Inline review comments — filter out those with human replies
-  try {
+  // Process inline review comments
+  if (inlineResult.status === "fulfilled") {
     const allReviewComments = parseNDJSON<{
       id: number;
       in_reply_to_id: number | null;
@@ -73,11 +119,7 @@ export function fetchBotComments(
       body: string;
       created_at: string;
       url: string;
-    }>(
-      gh(
-        `api repos/${repo.label}/pulls/${prNumber}/comments --paginate --jq '.[] | {id, in_reply_to_id, user: .user.login, path, line: (.line // .original_line), diff_hunk, body, created_at, url}'`,
-      ),
-    );
+    }>(inlineResult.value);
 
     // Find bot comment IDs that have human replies
     const repliedBotIds = new Set(
@@ -112,23 +154,17 @@ export function fetchBotComments(
         });
       }
     }
-  } catch {
-    // ignore
   }
 
-  // 2. Review-level comments
-  try {
+  // Process review-level comments
+  if (reviewResult.status === "fulfilled") {
     const reviews = parseNDJSON<{
       id: number;
       body: string;
       user: string;
       state: string;
       submitted_at: string;
-    }>(
-      gh(
-        `api repos/${repo.label}/pulls/${prNumber}/reviews --paginate --jq '.[] | select(${botFilter}) | select(.body != "") | {id, body, user: .user.login, state, submitted_at}'`,
-      ),
-    );
+    }>(reviewResult.value);
 
     for (const r of reviews) {
       comments.push({
@@ -147,23 +183,17 @@ export function fetchBotComments(
         type: "review",
       });
     }
-  } catch {
-    // ignore
   }
 
-  // 3. Issue-level comments (PR conversation)
-  try {
+  // Process issue-level comments
+  if (issueResult.status === "fulfilled") {
     const issueComments = parseNDJSON<{
       id: number;
       body: string;
       user: string;
       created_at: string;
       url: string;
-    }>(
-      gh(
-        `api repos/${repo.label}/issues/${prNumber}/comments --paginate --jq '.[] | select(${botFilter}) | {id, body, user: .user.login, created_at, url}'`,
-      ),
-    );
+    }>(issueResult.value);
 
     for (const c of issueComments) {
       comments.push({
@@ -182,20 +212,18 @@ export function fetchBotComments(
         type: "issue_comment",
       });
     }
-  } catch {
-    // ignore
   }
 
   return comments;
 }
 
-export function getFileFromBranch(
+export async function getFileFromBranch(
   repo: string,
   branch: string,
   filePath: string,
-): string | null {
+): Promise<string | null> {
   try {
-    const raw = gh(
+    const raw = await gh(
       `api repos/${repo}/contents/${filePath}?ref=${branch} --jq '.content'`,
     );
     return Buffer.from(raw.trim(), "base64").toString("utf-8");
@@ -204,59 +232,99 @@ export function getFileFromBranch(
   }
 }
 
-export function getPRBranch(repo: string, prNumber: number): string | null {
+export async function getPRBranch(repo: string, prNumber: number): Promise<string | null> {
   try {
-    return gh(
+    const raw = await gh(
       `pr view ${prNumber} --repo ${repo} --json headRefName --jq '.headRefName'`,
-    ).trim();
+    );
+    return raw.trim();
   } catch {
     return null;
   }
 }
 
-export function postPRComment(
+export async function postPRComment(
   repo: string,
   prNumber: number,
   body: string,
-): void {
-  execSync(
-    `gh api repos/${repo}/issues/${prNumber}/comments --method POST --field body=@-`,
-    { input: body, encoding: "utf-8", timeout: 30000 },
+): Promise<void> {
+  await ghWithInput(
+    `api repos/${repo}/issues/${prNumber}/comments --method POST --field body=@-`,
+    body,
   );
 }
 
-export function replyToReviewComment(
+export async function replyToReviewComment(
   repo: string,
   prNumber: number,
   commentId: number,
   body: string,
-): void {
-  execSync(
-    `gh api repos/${repo}/pulls/${prNumber}/comments/${commentId}/replies --method POST --field body=@-`,
-    { input: body, encoding: "utf-8", timeout: 30000 },
+): Promise<void> {
+  await ghWithInput(
+    `api repos/${repo}/pulls/${prNumber}/comments/${commentId}/replies --method POST --field body=@-`,
+    body,
   );
 }
 
-export function getPRDiff(repo: string, prNumber: number): string | null {
+export async function getPRDiff(
+  repo: string,
+  prNumber: number,
+  localPath?: string,
+  branch?: string,
+): Promise<string | null> {
+  // Try gh pr diff first
   try {
-    return gh(`pr diff ${prNumber} --repo ${repo}`);
+    return await gh(`pr diff ${prNumber} --repo ${repo}`);
   } catch {
-    return null;
+    // gh pr diff fails for large diffs (HTTP 406) — fall back to local git diff
+  }
+
+  // Fallback: use local git diff if we have a local checkout
+  if (localPath && branch) {
+    try {
+      await execAsync("git fetch origin", { cwd: localPath, timeout: 60000 });
+      const { stdout } = await execAsync(
+        `git diff origin/main...origin/${branch}`,
+        { cwd: localPath, encoding: "utf-8", timeout: 30000, maxBuffer: 10 * 1024 * 1024 },
+      );
+      if (stdout.trim()) return stdout;
+    } catch {
+      // fall through
+    }
+  }
+
+  return null;
+}
+
+/** Submit a formal PR review with inline comments and optional code suggestions. */
+export async function submitPRReview(
+  repo: string,
+  prNumber: number,
+  opts: {
+    body: string;
+    event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
+    comments: Array<{
+      path: string;
+      line: number;
+      body: string;
+    }>;
+  },
+): Promise<void> {
+  const payload = JSON.stringify({
+    event: opts.event,
+    body: opts.body,
+    comments: opts.comments,
+  });
+  const tmpFile = path.join(os.tmpdir(), `pr-review-${Date.now()}.json`);
+  fs.writeFileSync(tmpFile, payload, "utf-8");
+  try {
+    await execAsync(
+      `gh api repos/${repo}/pulls/${prNumber}/reviews --method POST --input ${tmpFile}`,
+      { encoding: "utf-8", timeout: 30000 },
+    );
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
   }
 }
 
-export function fetchConfidenceScore(
-  repo: string,
-  prNumber: number,
-): number | null {
-  try {
-    const raw = gh(
-      `api repos/${repo}/pulls/${prNumber}/reviews --jq '[.[] | select(.user.login == "greptile-apps[bot]") | .body] | last'`,
-    );
-    const match = raw.match(/Confidence:\s*(\d)\/5/i);
-    if (match) return parseInt(match[1], 10);
-    return null;
-  } catch {
-    return null;
-  }
-}
+// Confidence score fetching is now handled by GreptileReviewer.fetchLatestReview()

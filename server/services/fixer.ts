@@ -4,8 +4,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import type { RepoConfig, BotComment, CommentState, FixResult } from "../types.js";
-import { postPRComment } from "./github.js";
 import { appendRunHistory, getRunHistory } from "./db.js";
+import { getReviewService } from "../infrastructure/reviewers/registry.js";
 
 const execAsync = promisify(exec);
 
@@ -667,38 +667,7 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
   }
 }
 
-// --- Re-review comment ---
-
-export function buildReReviewComment(
-  fixResults: FixResult[],
-  comments: BotComment[],
-  commentStates: CommentState[],
-): string {
-  if (fixResults.length === 0) return "";
-
-  const commitHash = fixResults[0].commitHash;
-  const allFiles = [...new Set(fixResults.flatMap((r) => r.filesChanged))];
-
-  const addressedList = comments.map((c) => {
-    const state = commentStates.find((s) => s.commentId === c.id);
-    const category = state?.analysis?.category ?? "SHOULD_FIX";
-    const file = c.path ? `\`${c.path}\`` : "general";
-    const summary = c.body.split("\n")[0].slice(0, 100);
-    return `- **[${category}]** ${file}: ${summary}`;
-  });
-
-  return `@greptileai Please re-review this PR.
-
-## Changes Made (commit ${commitHash})
-
-### Addressed Comments
-${addressedList.join("\n")}
-
-### Modified Files
-${allFiles.map((f) => `- \`${f}\``).join("\n")}
-
-Please include an updated **Confidence: X/5** score in your review.`;
-}
+// Re-review comment building is now handled by GreptileReviewer.buildReReviewBody()
 
 interface FixAndReReviewInput extends FixCommentsInput {
   prNumber: number;
@@ -709,8 +678,21 @@ export async function fixAndPostReReview(input: FixAndReReviewInput): Promise<Fi
   const results = await fixComments(input);
 
   if (results.length > 0 && input.requestReReview) {
-    const body = buildReReviewComment(results, input.comments, input.commentStates);
-    postPRComment(input.repo.label, input.prNumber, body);
+    try {
+      const service = getReviewService();
+      const greptile = service.getReviewer("greptile");
+      if (greptile) {
+        await greptile.requestReview({
+          repo: input.repo.label,
+          prNumber: input.prNumber,
+          prTitle: input.prTitle,
+          branch: input.branch,
+          localPath: input.repo.localPath,
+        });
+      }
+    } catch (err) {
+      console.error("Failed to request Greptile re-review:", err);
+    }
   }
 
   return results;
