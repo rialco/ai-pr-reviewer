@@ -43,6 +43,22 @@ body {
   font-family: system-ui, -apple-system, sans-serif;
 }
 
+@keyframes enter-fade-slide {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-enter-fade-slide {
+  animation: enter-fade-slide 180ms ease-out both;
+  will-change: opacity, transform;
+}
+
 @keyframes breathe {
   0%, 100% { box-shadow: 0 0 8px 0 var(--breathe-color, rgba(109, 91, 247, 0.15)); }
   50% { box-shadow: 0 0 20px 4px var(--breathe-color, rgba(109, 91, 247, 0.35)); }

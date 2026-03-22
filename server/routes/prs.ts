@@ -20,13 +20,23 @@ import {
   getSummary,
   updateLastPoll,
   getLatestReviewPerReviewer,
+  recordTimelineEvent,
+  getTimeline,
+  getTimelineEvent,
+  updateTimelineEventDebug,
+  getCoordinatorPRPreference,
+  updateCoordinatorPRPreference,
 } from "../services/db.js";
 import {
   listOpenPRs,
+  getPROverview,
   replyToReviewComment,
 } from "../services/github.js";
 import {
   analyzeComments,
+  getAnalyzerAgentLabel,
+  isAnalyzerAgentAvailable,
+  type AnalyzerAgent,
   type AnalysisProgressEvent,
 } from "../services/analyzer.js";
 import {
@@ -35,6 +45,8 @@ import {
   clearFixProgress,
   getFixHistory,
   getWorkDir,
+  isFixerAgentAvailable,
+  type FixerAgent,
 } from "../services/fixer.js";
 import { pollPR, syncRepo } from "../services/poller.js";
 import {
@@ -45,6 +57,7 @@ import {
   failAnalysisJob,
   getActivityFeed,
 } from "../services/jobs.js";
+import { executeSuggestedNextStep, getSuggestedNextStep } from "../services/workflow.js";
 
 const router = Router();
 
@@ -107,6 +120,41 @@ router.get("/:repo/:prNumber/comments", (req, res) => {
   res.json(enriched);
 });
 
+// Get overview metadata for a PR
+router.get("/:repo/:prNumber/overview", async (req, res) => {
+  const repoLabel = decodeURIComponent(req.params.repo);
+  const prNumber = parseInt(req.params.prNumber, 10);
+
+  const repo = getRepo(repoLabel);
+  if (!repo) {
+    res.status(404).json({ error: "Repo not configured" });
+    return;
+  }
+
+  const overview = await getPROverview(repoLabel, prNumber);
+  if (!overview) {
+    res.status(404).json({ error: "PR overview not found" });
+    return;
+  }
+
+  res.json(overview);
+});
+
+router.get("/:repo/:prNumber/coordinator-preference", (req, res) => {
+  const repoLabel = decodeURIComponent(req.params.repo);
+  const prNumber = parseInt(req.params.prNumber, 10);
+
+  res.json(getCoordinatorPRPreference(repoLabel, prNumber));
+});
+
+router.patch("/:repo/:prNumber/coordinator-preference", (req, res) => {
+  const repoLabel = decodeURIComponent(req.params.repo);
+  const prNumber = parseInt(req.params.prNumber, 10);
+  const ignored = Boolean(req.body?.ignored);
+
+  res.json(updateCoordinatorPRPreference(repoLabel, prNumber, ignored));
+});
+
 // Refresh comments for a specific PR from GitHub
 router.post("/:repo/:prNumber/refresh", async (req, res) => {
   const repoLabel = decodeURIComponent(req.params.repo);
@@ -126,6 +174,9 @@ router.post("/:repo/:prNumber/refresh", async (req, res) => {
   }
 
   const { newCount } = await pollPR(repoLabel, prNumber, pr.title, pr.url);
+  if (newCount > 0) {
+    recordTimelineEvent(repoLabel, prNumber, "comments_fetched", { newCount, source: "refresh" });
+  }
   res.json({ newComments: newCount });
 });
 
@@ -141,7 +192,22 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
   }
 
   // Get unanalyzed comments from DB
-  const { commentIds } = (req.body ?? {}) as { commentIds?: number[] };
+  const { commentIds, analyzerAgent: requestedAnalyzerAgent } = (req.body ?? {}) as {
+    commentIds?: number[];
+    analyzerAgent?: string;
+  };
+  const settings = getSettings();
+  const analyzerAgent: AnalyzerAgent =
+    requestedAnalyzerAgent === "codex" || requestedAnalyzerAgent === "claude"
+      ? requestedAnalyzerAgent
+      : settings.defaultAnalyzerAgent;
+  const analyzerLabel = getAnalyzerAgentLabel(analyzerAgent);
+
+  if (!isAnalyzerAgentAvailable(analyzerAgent)) {
+    res.status(400).json({ error: `${analyzerLabel} is not available` });
+    return;
+  }
+
   let toAnalyze;
   if (commentIds) {
     // Re-analyze specific comments
@@ -190,23 +256,69 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
   }
 
   // Track in the global job system
-  const jobId = startAnalysisJob(repoLabel, prNumber, toAnalyze.length);
+  const jobId = startAnalysisJob(
+    repoLabel,
+    prNumber,
+    toAnalyze.length,
+    analyzerAgent,
+    `${analyzerLabel} analyzing ${toAnalyze.length} comment(s)`,
+  );
 
   try {
-    const results = await analyzeComments(toAnalyze, repo, (event) => {
-      sendEvent(event);
-      // Mirror progress to the server-side job tracker
-      if (event.step === "claude_output") {
-        addAnalysisOutput(jobId, repoLabel, prNumber, event.message);
-      } else {
-        updateAnalysisStep(jobId, repoLabel, prNumber, event.message, event.detail);
-      }
-    });
+    const analysisRequestedEventId = recordTimelineEvent(
+      repoLabel,
+      prNumber,
+      "analysis_requested",
+      {
+        commentCount: toAnalyze.length,
+        commentIds: toAnalyze.map((c) => c.id),
+        analyzerAgent,
+        analyzerName: analyzerLabel,
+      },
+      {
+        analyzerAgent,
+        analyzerName: analyzerLabel,
+        repo: repoLabel,
+        prNumber,
+        prTitle: toAnalyze[0]?.prTitle ?? "",
+        commentCount: toAnalyze.length,
+        commentIds: toAnalyze.map((c) => c.id),
+      },
+    );
+
+    const results = await analyzeComments(
+      toAnalyze,
+      repo,
+      analyzerAgent,
+      (event) => {
+        sendEvent(event);
+        // Mirror progress to the server-side job tracker
+        if (event.step === "claude_output" || event.step === "codex_output") {
+          addAnalysisOutput(jobId, repoLabel, prNumber, event.message);
+        } else {
+          updateAnalysisStep(jobId, repoLabel, prNumber, event.message, event.detail);
+        }
+      },
+      (debugDetail) => {
+        updateTimelineEventDebug(analysisRequestedEventId, debugDetail);
+      },
+    );
 
     // Save results
     for (const r of results) {
       updateCommentAnalysis(repoLabel, r.commentId, r);
     }
+
+    const categoryCounts: Record<string, number> = {};
+    for (const r of results) {
+      categoryCounts[r.category] = (categoryCounts[r.category] ?? 0) + 1;
+    }
+    recordTimelineEvent(repoLabel, prNumber, "comments_analyzed", {
+      count: results.length,
+      categories: categoryCounts,
+      analyzerAgent,
+      analyzerName: analyzerLabel,
+    });
 
     completeAnalysisJob(jobId);
     sendEvent({ type: "complete", analyzed: results.length, results });
@@ -282,12 +394,21 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
     return;
   }
 
-  const { commentIds, requestReReview } = (req.body ?? {}) as {
+  const { commentIds, requestReReview, fixerAgent: requestedFixerAgent } = (req.body ?? {}) as {
     commentIds?: number[];
     requestReReview?: boolean;
+    fixerAgent?: FixerAgent;
   };
-
   const settings = getSettings();
+  const fixerAgent = requestedFixerAgent === "codex" || requestedFixerAgent === "claude"
+    ? requestedFixerAgent
+    : settings.defaultFixerAgent;
+
+  if (!isFixerAgentAvailable(fixerAgent)) {
+    res.status(400).json({ error: `${fixerAgent} CLI is not available` });
+    return;
+  }
+
   const shouldReReview = requestReReview ?? settings.autoReReview;
   const fixable = getFixableComments(repoLabel, prNumber, commentIds);
 
@@ -319,11 +440,34 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
     fixResults: existingPR?.fixResults ?? [],
   });
 
+  const fixStartedEventId = recordTimelineEvent(
+    repoLabel,
+    prNumber,
+    "fix_started",
+    {
+      commentCount: fixable.length,
+      commentIds: fixable.map((c) => c.id),
+      fixerAgent,
+    },
+    {
+      fixerAgent,
+      repo: repoLabel,
+      prNumber,
+      prTitle: pr.title,
+      branch: pr.headRefName,
+      commentIds: fixable.map((c) => c.id),
+      commentCount: fixable.length,
+      requestReReview: shouldReReview,
+      requestSource: "github_comments",
+    },
+  );
+
   // Respond 202 immediately
   res.status(202).json({ fixing: fixable.length });
 
   // Run fix in background (async — does not block the event loop)
   fixAndPostReReview({
+    fixerAgent,
     repo,
     branch: pr.headRefName,
     prNumber,
@@ -331,6 +475,9 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
     comments: fixable,
     commentStates: fixableStates,
     requestReReview: shouldReReview,
+    onDebug: (debugDetail) => {
+      updateTimelineEventDebug(fixStartedEventId, debugDetail);
+    },
   })
     .then((results) => {
       if (results.length > 0) {
@@ -340,10 +487,11 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
 
         const now = new Date().toISOString();
         const currentPR = getPRState(repoLabel, prNumber);
+        const newCycle = (currentPR?.reviewCycle ?? 0) + 1;
         upsertPRState({
           repo: repoLabel,
           prNumber,
-          reviewCycle: (currentPR?.reviewCycle ?? 0) + 1,
+          reviewCycle: newCycle,
           confidenceScore: currentPR?.confidenceScore ?? null,
           phase: shouldReReview ? "re_review_requested" : "fixed",
           lastFixedAt: now,
@@ -351,6 +499,14 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
             ? now
             : (currentPR?.lastReReviewAt ?? null),
           fixResults: [...(currentPR?.fixResults ?? []), ...results],
+        });
+
+        recordTimelineEvent(repoLabel, prNumber, "fix_completed", {
+          commitHash: results[0].commitHash,
+          filesChanged: results[0].filesChanged,
+          commentCount: results.length,
+          cycle: newCycle,
+          fixerAgent,
         });
       } else {
         // No changes — roll back
@@ -361,6 +517,10 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
         if (currentPR) {
           upsertPRState({ ...currentPR, phase: "analyzed" });
         }
+        recordTimelineEvent(repoLabel, prNumber, "fix_no_changes", {
+          commentCount: fixable.length,
+          fixerAgent,
+        });
       }
     })
     .catch((err) => {
@@ -372,6 +532,11 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
       if (currentPR) {
         upsertPRState({ ...currentPR, phase: "analyzed" });
       }
+      recordTimelineEvent(repoLabel, prNumber, "fix_failed", {
+        error: String(err),
+        commentCount: fixable.length,
+        fixerAgent,
+      });
     });
 });
 
@@ -435,6 +600,12 @@ router.post("/:repo/:prNumber/revert", async (req, res) => {
     console.error("Git revert failed (DB already rolled back):", err);
   }
 
+  recordTimelineEvent(repoLabel, prNumber, "fix_reverted", {
+    commitHash,
+    revertedComments: reverted,
+    gitReverted,
+  });
+
   res.json({ ok: true, revertedComments: reverted, gitReverted });
 });
 
@@ -466,6 +637,14 @@ router.post("/:repo/:prNumber/reply", async (req, res) => {
     ...(s.status === "rejected" ? { error: String(s.reason) } : {}),
   }));
 
+  const successCount = results.filter((r) => r.ok).length;
+  if (successCount > 0) {
+    recordTimelineEvent(repoLabel, prNumber, "comments_replied", {
+      count: successCount,
+      commentIds: results.filter((r) => r.ok).map((r) => r.commentId),
+    });
+  }
+
   res.json({ results });
 });
 
@@ -479,12 +658,13 @@ router.get("/:repo/:prNumber/status", (req, res) => {
 
   const prState = getPRState(repoLabel, prNumber);
   const fixableCount = getFixableCount(repoLabel, prNumber);
+  const nextStep = getSuggestedNextStep(repoLabel, prNumber);
 
   // Confidence scores now come from the reviews table via /api/reviews endpoints.
   // The old prs.confidence_score column is no longer the source of truth.
 
   const fixProgress = getFixProgress(repoLabel, prNumber);
-  const phase = prState?.phase ?? "polled";
+  const phase = nextStep.action === "merge_ready" ? "merge_ready" : (prState?.phase ?? "polled");
 
   // Clear fix progress once the fix is no longer in progress
   if (fixProgress && phase !== "fixing") {
@@ -513,6 +693,44 @@ router.get("/:repo/:prNumber/status", (req, res) => {
     fixProgress: fixProgress ?? null,
     fixHistory: getFixHistory(repoLabel, prNumber),
   });
+});
+
+// Get PR timeline
+router.get("/:repo/:prNumber/timeline", (req, res) => {
+  const repoLabel = decodeURIComponent(req.params.repo);
+  const prNumber = parseInt(req.params.prNumber, 10);
+  const limit = parseInt(req.query.limit as string, 10) || 100;
+
+  res.json(getTimeline(repoLabel, prNumber, limit));
+});
+
+router.get("/:repo/:prNumber/timeline/:eventId", (req, res) => {
+  const repoLabel = decodeURIComponent(req.params.repo);
+  const prNumber = parseInt(req.params.prNumber, 10);
+  const eventId = parseInt(req.params.eventId, 10);
+
+  const event = getTimelineEvent(repoLabel, prNumber, eventId);
+  if (!event) {
+    res.status(404).json({ error: "Timeline event not found" });
+    return;
+  }
+
+  res.json(event);
+});
+
+router.get("/:repo/:prNumber/next-step", (req, res) => {
+  const repoLabel = decodeURIComponent(req.params.repo);
+  const prNumber = parseInt(req.params.prNumber, 10);
+
+  res.json(getSuggestedNextStep(repoLabel, prNumber));
+});
+
+router.post("/:repo/:prNumber/next-step/execute", async (req, res) => {
+  const repoLabel = decodeURIComponent(req.params.repo);
+  const prNumber = parseInt(req.params.prNumber, 10);
+
+  const step = await executeSuggestedNextStep(repoLabel, prNumber);
+  res.json({ executed: step.canExecute && step.action !== "busy" && step.action !== "idle", step });
 });
 
 // Get dashboard summary

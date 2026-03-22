@@ -1,4 +1,4 @@
-import { getRepos, upsertGitHubComments, updateLastPoll, cleanupClosedPRComments } from "./db.js";
+import { getRepos, upsertGitHubComments, updateLastPoll, cleanupClosedPRComments, recordTimelineEvent } from "./db.js";
 import { listOpenPRs, fetchBotComments } from "./github.js";
 import type { RepoConfig, PRInfo } from "../types.js";
 import { getReviewService } from "../infrastructure/reviewers/registry.js";
@@ -47,10 +47,18 @@ export async function syncRepo(repo: RepoConfig): Promise<{ prs: PRInfo[]; newCo
       prs.map((pr) => fetchBotComments(repo, pr.number, pr.title, pr.url)),
     );
 
-    for (const result of commentResults) {
+    for (let i = 0; i < commentResults.length; i++) {
+      const result = commentResults[i];
       if (result.status === "fulfilled" && result.value.length > 0) {
         const upsertResult = upsertGitHubComments(result.value);
         newCount += upsertResult.newCount;
+        if (upsertResult.newCount > 0) {
+          recordTimelineEvent(repo.label, prs[i].number, "comments_fetched", {
+            newCount: upsertResult.newCount,
+            totalComments: result.value.length,
+            source: "sync",
+          });
+        }
       }
     }
 

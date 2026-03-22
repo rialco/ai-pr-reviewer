@@ -7,6 +7,11 @@ const STATE_PATH = path.join(import.meta.dirname, "../../data/state.json");
 
 const DEFAULT_SETTINGS: AppSettings = {
   autoReReview: false,
+  coordinatorEnabled: false,
+  coordinatorAgent: "claude",
+  defaultAnalyzerAgent: "claude",
+  defaultFixerAgent: "claude",
+  defaultReviewerIds: ["claude", "codex"],
 };
 
 function defaultState(): AppState {
@@ -25,7 +30,7 @@ export function loadState(): AppState {
     const state = JSON.parse(raw) as AppState;
     // Ensure prs and settings exist for backwards compatibility
     if (!state.prs) state.prs = {};
-    if (!state.settings) state.settings = { ...DEFAULT_SETTINGS };
+    state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
     return state;
   } catch {
     return defaultState();

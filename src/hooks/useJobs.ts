@@ -7,7 +7,7 @@ export interface JobStep {
   ts: string;
 }
 
-export type JobType = "analyze" | "fix" | "review" | "poll" | "sync" | "refresh" | "score_extract";
+export type JobType = "analyze" | "fix" | "review" | "poll" | "sync" | "refresh" | "score_extract" | "coordinator";
 
 export interface Job {
   id: string;

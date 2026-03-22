@@ -6,15 +6,20 @@ import os from "os";
 import path from "path";
 import type { ReviewerPort, PRContext } from "../../domain/review/ReviewerPort.js";
 import type { Review, ReviewProgress, ReviewerId } from "../../domain/review/types.js";
-import { getPRDiff, submitPRReview } from "../../services/github.js";
-import { insertReview, getLatestReview } from "../../services/db.js";
+import { getPRDiff } from "../../services/github.js";
+import {
+  getCurrentReviewCommentsByReviewer,
+  insertReview,
+  getLatestReview,
+  saveReviewComments,
+} from "../../services/db.js";
 import {
   buildReviewPrompt,
   parseReviewOutput,
-  formatGitHubCommentBody,
 } from "./reviewPrompt.js";
 
 const execAsync = promisify(exec);
+const CODEX_REVIEW_TIMEOUT_MS = 20 * 60 * 1000;
 
 export class CodexReviewer implements ReviewerPort {
   readonly id: ReviewerId = "codex";
@@ -33,6 +38,7 @@ export class CodexReviewer implements ReviewerPort {
   async requestReview(
     pr: PRContext,
     onProgress?: (event: ReviewProgress) => void,
+    onDebug?: (debugDetail: Record<string, unknown>) => void,
   ): Promise<Review> {
     const emit = (e: ReviewProgress) => onProgress?.(e);
 
@@ -94,7 +100,29 @@ export class CodexReviewer implements ReviewerPort {
         ? prDiff.slice(0, maxDiffLen) + "\n... (diff truncated)"
         : prDiff;
 
-    const prompt = buildReviewPrompt(pr, truncatedDiff, !!workDir);
+    const priorComments = getCurrentReviewCommentsByReviewer(pr.repo, pr.prNumber, this.id)
+      .map((comment) => ({
+        path: comment.path,
+        line: comment.line,
+        body: comment.body,
+        status: comment.status,
+        analysisCategory: comment.analysisCategory,
+      }));
+
+    const prompt = buildReviewPrompt(pr, truncatedDiff, !!workDir, priorComments);
+    onDebug?.({
+      reviewerId: this.id,
+      reviewerName: this.displayName,
+      repo: pr.repo,
+      prNumber: pr.prNumber,
+      prTitle: pr.prTitle,
+      branch: pr.branch,
+      hasWorktree: Boolean(workDir),
+      diffLength: prDiff.length,
+      diffTruncated: truncatedDiff !== prDiff,
+      priorCommentCount: priorComments.length,
+      prompt,
+    });
 
     // Step 4: Run Codex
     emit({
@@ -131,37 +159,17 @@ export class CodexReviewer implements ReviewerPort {
 
     const parsed = parseReviewOutput(result);
 
-    // Step 6: Post review to GitHub with inline comments
-    if (parsed.comments.length > 0 || parsed.summary) {
-      emit({
-        type: "progress",
-        step: "posting_review",
-        message: `Posting review to GitHub with ${parsed.comments.length} inline comment(s)...`,
-        progress: 90,
-      });
-      try {
-        const event = parsed.confidenceScore >= 4 ? "COMMENT" as const
-          : parsed.confidenceScore >= 2 ? "COMMENT" as const
-          : "REQUEST_CHANGES" as const;
-
-        await submitPRReview(pr.repo, pr.prNumber, {
-          body: `## Codex Review — Confidence: ${parsed.confidenceScore}/5\n\n${parsed.summary}`,
-          event,
-          comments: parsed.comments.map((c) => ({
-            path: c.path,
-            line: c.line,
-            body: formatGitHubCommentBody(c),
-          })),
-        });
-      } catch (err) {
-        emit({
-          type: "progress",
-          step: "posting_warning",
-          message: `Could not post review to GitHub: ${err}`,
-          progress: 92,
-        });
-      }
-    }
+    // Step 6: Save review comments locally (publish to GitHub is a separate manual step)
+    emit({
+      type: "progress",
+      step: "saving_comments",
+      message:
+        parsed.comments.length > 0
+          ? `Saving ${parsed.comments.length} local comment(s)...`
+          : "No actionable review comments. Preserving prior runs and superseding stale open comments...",
+      progress: 90,
+    });
+    saveReviewComments(pr.repo, pr.prNumber, "codex", parsed.comments);
 
     const review: Review = {
       repo: pr.repo,
@@ -224,13 +232,20 @@ function runCodexReview(
 
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error("Codex review timed out after 10 minutes"));
-    }, 600000);
+      reject(new Error(`Codex review timed out after ${Math.floor(CODEX_REVIEW_TIMEOUT_MS / 60000)} minutes`));
+    }, CODEX_REVIEW_TIMEOUT_MS);
 
     child.on("close", (code) => {
       clearTimeout(timeout);
       if (code !== 0 && !stdout.trim()) {
-        reject(new Error(`Codex exited with code ${code}: ${stderr}`));
+        // Strip ANSI escape codes and extract the meaningful error
+        const cleanStderr = stderr.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "").trim();
+        const errorLine = cleanStderr
+          .split("\n")
+          .filter((l) => l.trim())
+          .find((l) => /error/i.test(l));
+        const message = errorLine?.replace(/^ERROR:\s*/i, "").trim() || cleanStderr.split("\n").pop()?.trim() || "Unknown error";
+        reject(new Error(`Codex review failed: ${message}`));
       } else {
         resolve(stdout);
       }

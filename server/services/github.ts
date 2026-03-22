@@ -7,6 +7,29 @@ import type { PRInfo, BotComment, RepoConfig } from "../types.js";
 
 const execAsync = promisify(exec);
 
+export interface PRFileChange {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface PROverview {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  headRefName: string;
+  baseRefName: string;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  commitCount: number;
+  files: PRFileChange[];
+}
+
 /** Run a gh command that needs stdin input (e.g. posting comment bodies). */
 function ghWithInput(args: string, input: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -76,6 +99,60 @@ export async function listOpenPRs(repo: RepoConfig): Promise<PRInfo[]> {
     }));
   } catch {
     return [];
+  }
+}
+
+export async function getPROverview(repo: string, prNumber: number): Promise<PROverview | null> {
+  try {
+    const raw = await gh(
+      `pr view ${prNumber} --repo ${repo} --json number,title,body,url,headRefName,baseRefName,author,createdAt,updatedAt,additions,deletions,files,commits`,
+    );
+    const pr = JSON.parse(raw) as {
+      number: number;
+      title: string;
+      body: string | null;
+      url: string;
+      headRefName: string;
+      baseRefName: string;
+      author?: { login?: string | null } | null;
+      createdAt: string;
+      updatedAt: string;
+      additions?: number | null;
+      deletions?: number | null;
+      files?: Array<{
+        path?: string | null;
+        additions?: number | null;
+        deletions?: number | null;
+      }> | null;
+      commits?: Array<unknown> | null;
+    };
+
+    const files = (pr.files ?? [])
+      .filter((file): file is { path: string; additions?: number | null; deletions?: number | null } => !!file?.path)
+      .map((file) => ({
+        path: file.path,
+        additions: file.additions ?? 0,
+        deletions: file.deletions ?? 0,
+      }));
+
+    return {
+      number: pr.number,
+      title: pr.title,
+      body: pr.body ?? "",
+      url: pr.url,
+      headRefName: pr.headRefName,
+      baseRefName: pr.baseRefName,
+      author: pr.author?.login ?? "unknown",
+      createdAt: pr.createdAt,
+      updatedAt: pr.updatedAt,
+      additions: pr.additions ?? 0,
+      deletions: pr.deletions ?? 0,
+      changedFiles: files.length,
+      commitCount: pr.commits?.length ?? 0,
+      files,
+    };
+  } catch {
+    return null;
   }
 }
 

@@ -22,6 +22,17 @@ router.post("/", (req, res) => {
   res.json(config);
 });
 
+// Settings
+router.get("/settings", (_req, res) => {
+  res.json(getSettings());
+});
+
+router.patch("/settings", (req, res) => {
+  const updates = req.body as Partial<AppSettings>;
+  const settings = updateSettings(updates);
+  res.json(settings);
+});
+
 router.patch("/:label", (req, res) => {
   const label = decodeURIComponent(req.params.label);
   const { localPath } = req.body as { localPath?: string | null };
@@ -109,17 +120,6 @@ router.get("/browse", (req, res) => {
   } catch {
     res.status(400).json({ error: `Cannot read directory: ${resolved}` });
   }
-});
-
-// Settings
-router.get("/settings", (_req, res) => {
-  res.json(getSettings());
-});
-
-router.patch("/settings", (req, res) => {
-  const updates = req.body as Partial<AppSettings>;
-  const settings = updateSettings(updates);
-  res.json(settings);
 });
 
 export default router;

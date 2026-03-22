@@ -1,14 +1,15 @@
 import { useMemo } from "react";
 import { CodeBlock } from "./CodeBlock";
+import { cn } from "@/lib/utils";
 
 /**
  * Lightweight GitHub-flavored markdown renderer for bot comment bodies.
  * Handles: images, links, inline code, code blocks, bold, italic, headers,
  * blockquotes, horizontal rules, and unordered/ordered lists.
  */
-export function MarkdownBody({ text }: { text: string }) {
+export function MarkdownBody({ text, className }: { text: string; className?: string }) {
   const elements = useMemo(() => parseMarkdown(htmlToMarkdown(text)), [text]);
-  return <div className="text-sm text-foreground/90 leading-relaxed space-y-2">{elements}</div>;
+  return <div className={cn("text-sm text-foreground/90 leading-relaxed space-y-2", className)}>{elements}</div>;
 }
 
 /**

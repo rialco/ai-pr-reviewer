@@ -25,6 +25,7 @@ export class ReviewService {
     reviewerId: ReviewerId,
     pr: PRContext,
     onProgress?: (event: ReviewProgress) => void,
+    onDebug?: (debugDetail: Record<string, unknown>) => void,
   ): Promise<Review> {
     const reviewer = this.reviewers.get(reviewerId);
     if (!reviewer) {
@@ -33,7 +34,7 @@ export class ReviewService {
     if (!reviewer.canRequestReview()) {
       throw new Error(`Reviewer ${reviewerId} is not available`);
     }
-    return reviewer.requestReview(pr, onProgress);
+    return reviewer.requestReview(pr, onProgress, onDebug);
   }
 
   async fetchLatestReviews(

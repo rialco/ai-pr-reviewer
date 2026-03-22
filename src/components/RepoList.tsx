@@ -7,16 +7,18 @@ function DirectoryPicker({
   initialPath,
   onSelect,
   onCancel,
+  className,
 }: {
   initialPath: string;
   onSelect: (path: string) => void;
   onCancel: () => void;
+  className?: string;
 }) {
   const [browsePath, setBrowsePath] = useState(initialPath || "~");
   const { data: browseData, isLoading } = useBrowse(browsePath);
 
   return (
-    <div className="mt-1.5 ml-5.5 border border-border rounded-md overflow-hidden bg-background">
+    <div className={`border border-border rounded-xl overflow-hidden bg-background ${className ?? ""}`}>
       {/* Current path header */}
       <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-muted/50 border-b border-border">
         <FolderOpen className="h-3 w-3 text-muted-foreground shrink-0" />
@@ -113,73 +115,93 @@ export function RepoList() {
   const [syncingLabel, setSyncingLabel] = useState<string | null>(null);
 
   if (!repos?.length) {
-    return (
-      <p className="text-sm text-muted-foreground py-3">
-        No repos configured. Add one above.
-      </p>
-    );
+    return null;
   }
 
   return (
     <>
-      <ul className="space-y-1.5">
+      <div className="contents">
         {repos.map((r) => (
-          <li key={r.label} className="rounded-md px-3 py-2 hover:bg-accent/50 group">
-            <div className="flex items-center justify-between">
-              <span className="flex items-center gap-2 text-sm">
-                <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
-                {r.label}
-              </span>
-              <div className="flex items-center gap-0.5">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="opacity-0 group-hover:opacity-100 h-7 w-7"
-                  onClick={() => {
-                    setSyncingLabel(r.label);
-                    syncRepo.mutate(r.label, {
-                      onSettled: () => setSyncingLabel(null),
-                    });
-                  }}
-                  disabled={syncingLabel === r.label}
-                  title="Sync PRs & comments"
-                >
-                  {syncingLabel === r.label ? (
-                    <Loader2 className="h-3 w-3 text-muted-foreground animate-spin" />
-                  ) : (
-                    <RefreshCw className="h-3 w-3 text-muted-foreground" />
+          <div key={r.label} className="contents">
+            <div
+              className={`group min-h-[84px] rounded-xl border p-2.5 transition-all ${
+                browsingLabel === r.label
+                  ? "border-primary/30 bg-primary/10 shadow-[0_0_0_1px_rgba(109,91,247,0.18)]"
+                  : "border-border bg-card hover:border-primary/15 hover:bg-muted/25"
+              }`}
+            >
+              <div className="flex h-full flex-col">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="truncate text-[10px] uppercase tracking-wide text-muted-foreground">
+                        {r.owner}
+                      </span>
+                    </div>
+                    <p className="mt-1 truncate text-sm font-medium leading-tight text-foreground">
+                      {r.repo}
+                    </p>
+                  </div>
+                  {r.localPath && (
+                    <span
+                      className="mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full bg-green-500/80"
+                      title={r.localPath}
+                    />
                   )}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="opacity-0 group-hover:opacity-100 h-7 w-7"
-                  onClick={() => setBrowsingLabel(browsingLabel === r.label ? null : r.label)}
-                  title="Set local path"
-                >
-                  <FolderOpen className="h-3 w-3 text-muted-foreground" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="opacity-0 group-hover:opacity-100 h-7 w-7"
-                  onClick={() => setDeleteLabel(r.label)}
-                >
-                  <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
-                </Button>
+                </div>
+
+                <div className="mt-auto flex items-center justify-between pt-2">
+                  <span className="truncate text-[10px] text-muted-foreground" title={r.label}>
+                    {r.label}
+                  </span>
+                  <div className="ml-2 flex items-center gap-0.5">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => {
+                        setSyncingLabel(r.label);
+                        syncRepo.mutate(r.label, {
+                          onSettled: () => setSyncingLabel(null),
+                        });
+                      }}
+                      disabled={syncingLabel === r.label}
+                      title="Sync PRs & comments"
+                    >
+                      {syncingLabel === r.label ? (
+                        <Loader2 className="h-3 w-3 text-muted-foreground animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3 w-3 text-muted-foreground" />
+                      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => setBrowsingLabel(browsingLabel === r.label ? null : r.label)}
+                      title="Set local path"
+                    >
+                      <FolderOpen className="h-3 w-3 text-muted-foreground" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => setDeleteLabel(r.label)}
+                      title="Remove repo"
+                    >
+                      <Trash2 className="h-3 w-3 text-muted-foreground" />
+                    </Button>
+                  </div>
+                </div>
               </div>
             </div>
-            {r.localPath && browsingLabel !== r.label && (
-              <div className="flex items-center gap-1.5 mt-1 ml-5.5">
-                <FolderOpen className="h-3 w-3 text-muted-foreground shrink-0" />
-                <span className="text-xs text-muted-foreground truncate" title={r.localPath}>
-                  {r.localPath}
-                </span>
-              </div>
-            )}
+
             {browsingLabel === r.label && (
               <DirectoryPicker
                 initialPath={r.localPath || "~"}
+                className="col-span-3"
                 onSelect={(selectedPath) => {
                   updateRepo.mutate({ label: r.label, localPath: selectedPath });
                   setBrowsingLabel(null);
@@ -187,9 +209,9 @@ export function RepoList() {
                 onCancel={() => setBrowsingLabel(null)}
               />
             )}
-          </li>
+          </div>
         ))}
-      </ul>
+      </div>
 
       {deleteLabel !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">

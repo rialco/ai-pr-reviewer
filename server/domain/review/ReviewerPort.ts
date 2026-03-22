@@ -20,6 +20,7 @@ export interface ReviewerPort {
   requestReview(
     pr: PRContext,
     onProgress?: (event: ReviewProgress) => void,
+    onDebug?: (debugDetail: Record<string, unknown>) => void,
   ): Promise<Review>;
 
   /** Fetch the latest review from this reviewer (for remote reviewers, fetches from GitHub) */

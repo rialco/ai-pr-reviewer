@@ -10,7 +10,8 @@ export type JobType =
   | "poll"
   | "sync"
   | "refresh"
-  | "score_extract";
+  | "score_extract"
+  | "coordinator";
 
 export interface Job {
   id: string;
@@ -158,11 +159,18 @@ export function failJob(id: string, error: string): void {
 
 // --- Backward-compatible analysis job functions ---
 
-export function startAnalysisJob(repo: string, prNumber: number, commentCount: number): string {
+export function startAnalysisJob(
+  repo: string,
+  prNumber: number,
+  commentCount: number,
+  reviewerId?: string,
+  detail?: string,
+): string {
   return startJob("analyze", repo, {
     prNumber,
+    reviewerId,
     commentCount,
-    detail: `Analyzing ${commentCount} comment(s)`,
+    detail: detail ?? `Analyzing ${commentCount} comment(s)`,
   });
 }
 
