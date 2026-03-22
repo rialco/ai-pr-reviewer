@@ -26,5 +26,5 @@ app.listen(PORT, () => {
   console.log(`PR Review server running on http://localhost:${PORT}`);
   // Start background poller (every 5 minutes)
   startBackgroundPoller(5 * 60 * 1000);
-  startWorkflowCoordinator(3 * 60 * 1000);
+  startWorkflowCoordinator(30 * 1000);
 });

@@ -16,6 +16,8 @@ Update this document whenever a new design decision becomes part of the product 
 - Prefer shadcn-style primitives in `src/components/ui/` for interactive UI.
 - For selects, menus, popovers, dialogs, and similar composite widgets, use the local shadcn/Radix wrapper component before introducing native controls or bespoke implementations.
 - When a reusable visual pattern appears more than once, extract it into a shared UI primitive instead of duplicating markup.
+- Use `src/components/ui/dialog.tsx` for modal workflows that collect input or show richer detail. Reserve `ConfirmDialog` for simple confirmation-only prompts.
+- Use `src/components/ui/popover.tsx` for anchored panels that open from existing layout surfaces, such as footer docks or compact settings cards.
 
 ## Section Headers
 

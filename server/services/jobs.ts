@@ -1,4 +1,5 @@
-import type { FixLogEntry, FixProgress } from "./fixer.js";
+import type { RunHistoryStep } from "../types.js";
+import type { FixProgress } from "./fixer.js";
 import { getAllFixProgress } from "./fixer.js";
 
 // --- General-purpose activity tracking ---
@@ -25,7 +26,7 @@ export interface Job {
   currentStep?: string;
   detail?: string;
   commentCount?: number;
-  steps: FixLogEntry[];
+  steps: RunHistoryStep[];
   output: string[];
 }
 

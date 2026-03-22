@@ -3,9 +3,17 @@ import { promisify } from "util";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import type { RepoConfig, BotComment, CommentState, FixResult } from "../types.js";
+import type {
+  RepoConfig,
+  BotComment,
+  CommentState,
+  FixResult,
+  PersistedRunHistory,
+  RunHistoryStep,
+} from "../types.js";
 import { appendRunHistory, getRunHistory } from "./db.js";
 import { getReviewService } from "../infrastructure/reviewers/registry.js";
+import { buildPersistedRunHistory } from "./runHistory.js";
 
 const execAsync = promisify(exec);
 
@@ -18,12 +26,7 @@ const FIXER_AGENT_META: Record<FixerAgent, { label: string; command: string }> =
 
 // --- Fix progress log (in-memory, keyed by "repo:prNumber") ---
 
-export interface FixLogEntry {
-  step: string;
-  status: "active" | "done" | "error";
-  detail?: string;
-  ts: string;
-}
+export type FixLogEntry = RunHistoryStep;
 
 export interface FixProgress {
   agent: FixerAgent;
@@ -259,9 +262,31 @@ function summarizeStreamEvent(event: StreamEvent): string | null {
 interface WorkDir {
   workDir: string;
   cleanup: () => Promise<void>;
+  restorePaths: string[];
+  transientSymlinkPaths: string[];
 }
 
-export async function getWorkDir(repo: RepoConfig, branch: string): Promise<WorkDir> {
+async function restoreWorkspaceMutations(
+  workDir: string,
+  restorePaths: string[],
+  transientSymlinkPaths: string[],
+): Promise<void> {
+  for (const relativePath of transientSymlinkPaths) {
+    const fullPath = path.join(workDir, relativePath);
+    try {
+      if (fs.lstatSync(fullPath).isSymbolicLink()) {
+        fs.unlinkSync(fullPath);
+      }
+    } catch {}
+  }
+
+  if (restorePaths.length > 0) {
+    const quotedPaths = restorePaths.map((p) => JSON.stringify(p)).join(" ");
+    await execAsync(`git checkout -- ${quotedPaths}`, { cwd: workDir });
+  }
+}
+
+export async function getWorkDir(repo: RepoConfig, branch: string, fixerAgent?: FixerAgent): Promise<WorkDir> {
   if (repo.localPath) {
     await execAsync("git fetch origin", {
       cwd: repo.localPath,
@@ -276,13 +301,16 @@ export async function getWorkDir(repo: RepoConfig, branch: string): Promise<Work
       timeout: 60000,
     });
 
-    // Remove any .claude/hooks from the worktree so Claude doesn't
-    // try to follow repo-specific hook instructions (e.g. require-worktree)
-    // We restore them before committing so only source changes get committed
+    const restorePaths: string[] = [];
+    const transientSymlinkPaths: string[] = [];
+
+    // Claude-specific repo hooks can interfere with automated fixes inside
+    // the temporary worktree. Strip only the hook directory we mutate here.
     const hooksDir = path.join(tmpDir, ".claude", "hooks");
-    const hadHooks = fs.existsSync(hooksDir);
+    const hadHooks = fixerAgent === "claude" && fs.existsSync(hooksDir);
     if (hadHooks) {
       fs.rmSync(hooksDir, { recursive: true, force: true });
+      restorePaths.push(".claude/hooks");
     }
 
     // Symlink node_modules from the local repo so formatters/linters
@@ -291,13 +319,15 @@ export async function getWorkDir(repo: RepoConfig, branch: string): Promise<Work
     const worktreeNodeModules = path.join(tmpDir, "node_modules");
     if (fs.existsSync(localNodeModules) && !fs.existsSync(worktreeNodeModules)) {
       fs.symlinkSync(localNodeModules, worktreeNodeModules, "dir");
+      transientSymlinkPaths.push("node_modules");
     }
 
     return {
       workDir: tmpDir,
+      restorePaths,
+      transientSymlinkPaths,
       cleanup: async () => {
-        // Remove symlink before worktree removal so git doesn't complain
-        try { if (fs.lstatSync(worktreeNodeModules).isSymbolicLink()) fs.unlinkSync(worktreeNodeModules); } catch {}
+        await restoreWorkspaceMutations(tmpDir, restorePaths, transientSymlinkPaths);
         await execAsync(`git worktree remove ${JSON.stringify(tmpDir)} --force`, {
           cwd: repo.localPath,
         });
@@ -312,6 +342,8 @@ export async function getWorkDir(repo: RepoConfig, branch: string): Promise<Work
   );
   return {
     workDir: tmpDir,
+    restorePaths: [],
+    transientSymlinkPaths: [],
     cleanup: async () => fs.rmSync(tmpDir, { recursive: true, force: true }),
   };
 }
@@ -583,6 +615,113 @@ function detectPackageManager(workDir: string): "pnpm" | "yarn" | "npm" {
   return "npm";
 }
 
+interface LoggedCommandOptions {
+  cwd: string;
+  timeout?: number;
+  onOutput?: (line: string) => void;
+}
+
+function createLineForwarder(onLine?: (line: string) => void): {
+  push: (text: string) => void;
+  flush: () => void;
+} {
+  let buffer = "";
+
+  return {
+    push(text: string) {
+      buffer += text;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed) onLine?.(trimmed);
+      }
+    },
+    flush() {
+      const trimmed = buffer.trim();
+      if (trimmed) onLine?.(trimmed);
+      buffer = "";
+    },
+  };
+}
+
+function runLoggedCommand(
+  command: string,
+  { cwd, timeout, onOutput }: LoggedCommandOptions,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, {
+      cwd,
+      shell: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const recentLines: string[] = [];
+    const recordLine = (line: string) => {
+      recentLines.push(line);
+      if (recentLines.length > 20) {
+        recentLines.shift();
+      }
+      onOutput?.(line);
+    };
+    const stdoutForwarder = createLineForwarder(recordLine);
+    const stderrForwarder = createLineForwarder(recordLine);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      stdoutForwarder.flush();
+      stderrForwarder.flush();
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutForwarder.push(chunk.toString());
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrForwarder.push(chunk.toString());
+    });
+
+    child.on("error", (err) => finish(err));
+
+    child.on("close", (code, signal) => {
+      stdoutForwarder.flush();
+      stderrForwarder.flush();
+
+      if (signal) {
+        finish(new Error(`killed by signal ${signal}`));
+        return;
+      }
+
+      if (code !== 0) {
+        finish(new Error(
+          recentLines.length > 0
+            ? `exited with code ${code}: ${recentLines.slice(-10).join(" | ")}`
+            : `exited with code ${code}`,
+        ));
+        return;
+      }
+
+      finish();
+    });
+
+    if (timeout) {
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(new Error(`timed out after ${Math.ceil(timeout / 1000)}s`));
+      }, timeout);
+    }
+  });
+}
+
 async function runPostFixFormatting(
   workDir: string,
   changedFiles: string[],
@@ -605,7 +744,7 @@ async function runPostFixFormatting(
   if (pkg.scripts?.format) {
     onOutput?.(`Running ${run} format`);
     try {
-      await execAsync(`${run} format`, { cwd: workDir, timeout: 120000 });
+      await runLoggedCommand(`${run} format`, { cwd: workDir, timeout: 120000, onOutput });
       onOutput?.("Formatting complete");
     } catch (err) {
       onOutput?.(`Format script failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -624,7 +763,7 @@ async function runPostFixFormatting(
     if (!files) return;
     onOutput?.(`Running prettier on ${changedFiles.length} changed file(s)`);
     try {
-      await execAsync(`npx prettier --write ${files}`, { cwd: workDir, timeout: 120000 });
+      await runLoggedCommand(`npx prettier --write ${files}`, { cwd: workDir, timeout: 120000, onOutput });
       onOutput?.("Prettier formatting complete");
     } catch (err) {
       onOutput?.(`Prettier failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -639,7 +778,7 @@ async function runPostFixVerification(
 ): Promise<void> {
   onOutput?.("Running git diff --check");
   try {
-    await execAsync("git diff --check", { cwd: workDir, timeout: 30000 });
+    await runLoggedCommand("git diff --check", { cwd: workDir, timeout: 30000, onOutput });
     onOutput?.("git diff --check passed");
   } catch (err) {
     throw new Error(`git diff --check failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -677,7 +816,7 @@ async function runPostFixVerification(
   for (const command of commands) {
     onOutput?.(`Running ${command}`);
     try {
-      await execAsync(command, { cwd: workDir, timeout: 180000 });
+      await runLoggedCommand(command, { cwd: workDir, timeout: 180000, onOutput });
       onOutput?.(`${command} passed`);
     } catch (err) {
       throw new Error(`Verification failed for "${command}": ${err instanceof Error ? err.message : String(err)}`);
@@ -696,10 +835,21 @@ interface FixCommentsInput {
   comments: BotComment[];
   commentStates: CommentState[];
   onDebug?: (debugDetail: Record<string, unknown>) => void;
+  onHistoryUpdate?: (history: PersistedRunHistory) => void;
 }
 
 export async function fixComments(input: FixCommentsInput): Promise<FixResult[]> {
-  const { fixerAgent, repo, branch, prNumber, comments, commentStates, prTitle, onDebug } = input;
+  const {
+    fixerAgent,
+    repo,
+    branch,
+    prNumber,
+    comments,
+    commentStates,
+    prTitle,
+    onDebug,
+    onHistoryUpdate,
+  } = input;
   const repoLabel = repo.label;
   const agentLabel = getFixerAgentLabel(fixerAgent);
 
@@ -707,11 +857,59 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
     throw new Error(`${agentLabel} CLI is not available on this machine`);
   }
 
-  logStep(repoLabel, prNumber, "Preparing workspace", `Fetching branch ${branch}`, fixerAgent);
-  const { workDir, cleanup } = await getWorkDir(repo, branch);
+  const emitPersistedHistory = (overrides?: {
+    status?: PersistedRunHistory["status"];
+    detail?: string;
+    currentStep?: string;
+  }): void => {
+    if (!onHistoryUpdate) return;
+    const progress = getFixProgress(repoLabel, prNumber);
+    if (!progress) return;
+    const activeStep = progress.steps.find((step) => step.status === "active");
+    const currentStep =
+      overrides?.currentStep ??
+      activeStep?.step ??
+      progress.steps[progress.steps.length - 1]?.step;
+    const lastStep = progress.steps[progress.steps.length - 1];
+
+    onHistoryUpdate(
+      buildPersistedRunHistory({
+        status: overrides?.status,
+        startedAt: progress.startedAt,
+        finishedAt: progress.finishedAt,
+        currentStep,
+        detail: overrides?.detail ?? activeStep?.detail ?? lastStep?.detail,
+        steps: progress.steps,
+        output: progress.output,
+      }),
+    );
+  };
+
+  const logHistoryStep = (step: string, detail?: string): void => {
+    logStep(repoLabel, prNumber, step, detail, fixerAgent);
+    emitPersistedHistory({ detail, currentStep: step });
+  };
+
+  const logHistoryOutput = (line: string): void => {
+    logOutput(repoLabel, prNumber, line, fixerAgent);
+    emitPersistedHistory();
+  };
+
+  const completeHistory = (detail?: string): void => {
+    logDone(repoLabel, prNumber);
+    emitPersistedHistory({ status: "done", detail });
+  };
+
+  const failHistory = (error: string): void => {
+    logError(repoLabel, prNumber, error);
+    emitPersistedHistory({ status: "error", detail: error });
+  };
+
+  logHistoryStep("Preparing workspace", `Fetching branch ${branch}`);
+  const { workDir, cleanup, restorePaths, transientSymlinkPaths } = await getWorkDir(repo, branch, fixerAgent);
 
   try {
-    logStep(repoLabel, prNumber, `Running ${agentLabel} fix`, `${comments.length} issue(s) to address`, fixerAgent);
+    logHistoryStep(`Running ${agentLabel} fix`, `${comments.length} issue(s) to address`);
     const prompt = buildFixPrompt({ agent: fixerAgent, comments, commentStates, prTitle });
     onDebug?.({
       fixerAgent,
@@ -734,12 +932,12 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
       }),
       prompt,
     });
-    logOutput(repoLabel, prNumber, `--- Prompt (${prompt.length} chars) ---`, fixerAgent);
+    logHistoryOutput(`--- Prompt (${prompt.length} chars) ---`);
     for (const c of comments) {
-      logOutput(repoLabel, prNumber, `  #${c.id}: ${c.path ?? "general"}${c.line ? `:${c.line}` : ""} — ${c.body.split("\n")[0].slice(0, 100)}`, fixerAgent);
-      logOutput(repoLabel, prNumber, `    diffHunk: ${c.diffHunk ? `${c.diffHunk.length} chars` : "NONE"}`, fixerAgent);
+      logHistoryOutput(`  #${c.id}: ${c.path ?? "general"}${c.line ? `:${c.line}` : ""} — ${c.body.split("\n")[0].slice(0, 100)}`);
+      logHistoryOutput(`    diffHunk: ${c.diffHunk ? `${c.diffHunk.length} chars` : "NONE"}`);
     }
-    logOutput(repoLabel, prNumber, "---", fixerAgent);
+    logHistoryOutput("---");
     // Build path variants to strip from output (macOS resolves /var → /private/var)
     // Use realpath to get the canonical path, then collect both variants, longest first
     let realWorkDir: string;
@@ -752,54 +950,50 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
       for (const p of pathVariants) {
         cleaned = cleaned.replaceAll(p + "/", "").replaceAll(p, ".");
       }
-      logOutput(repoLabel, prNumber, cleaned, fixerAgent);
+      logHistoryOutput(cleaned);
     });
 
-    logStep(repoLabel, prNumber, "Checking changes", undefined, fixerAgent);
+    logHistoryStep("Checking changes");
     const { stdout: diffOutput } = await execAsync("git diff --name-only", {
       cwd: workDir,
     });
 
-    // Restore .claude/ before checking diff so hook deletions don't count
-    await execAsync("git checkout -- .claude/ 2>/dev/null || true", { cwd: workDir });
+    // Restore only the temporary workspace mutations we introduced so they
+    // do not count as source changes.
+    await restoreWorkspaceMutations(workDir, restorePaths, transientSymlinkPaths);
 
     if (!diffOutput.trim()) {
-      logStep(repoLabel, prNumber, "No changes needed", `${agentLabel} produced no diff`, fixerAgent);
-      logDone(repoLabel, prNumber);
+      logHistoryStep("No changes needed", `${agentLabel} produced no diff`);
+      completeHistory(`${agentLabel} produced no diff`);
       return [];
     }
 
-    // Re-check diff after restoring .claude/
+    // Re-check diff after restoring temporary workspace mutations
     const { stdout: cleanDiff } = await execAsync("git diff --name-only", { cwd: workDir });
     if (!cleanDiff.trim()) {
-      logStep(repoLabel, prNumber, "No source changes", "Only local instruction files were modified", fixerAgent);
-      logDone(repoLabel, prNumber);
+      logHistoryStep("No source changes", "Only temporary workspace paths were modified");
+      completeHistory("Only temporary workspace paths were modified");
       return [];
     }
 
     const filesChanged = cleanDiff.trim().split("\n").filter(Boolean);
 
     // Run post-fix formatting (prettier, format script, etc.)
-    logStep(repoLabel, prNumber, "Running formatters", `${filesChanged.length} file(s)`, fixerAgent);
+    logHistoryStep("Running formatters", `${filesChanged.length} file(s)`);
     await runPostFixFormatting(workDir, filesChanged, (line) => {
-      logOutput(repoLabel, prNumber, line, fixerAgent);
+      logHistoryOutput(line);
     });
 
-    logStep(repoLabel, prNumber, "Running verification", undefined, fixerAgent);
+    logHistoryStep("Running verification");
     await runPostFixVerification(workDir, (line) => {
-      logOutput(repoLabel, prNumber, line, fixerAgent);
+      logHistoryOutput(line);
     });
 
     const commitMessage = buildCommitMessage(comments, commentStates, prTitle);
 
-    // Restore .claude/hooks before committing so we only commit source changes
-    await execAsync("git checkout -- .claude/ 2>/dev/null || true", { cwd: workDir });
+    await restoreWorkspaceMutations(workDir, restorePaths, transientSymlinkPaths);
 
-    // Remove the node_modules symlink before staging so it doesn't get committed
-    const nmSymlink = path.join(workDir, "node_modules");
-    try { if (fs.lstatSync(nmSymlink).isSymbolicLink()) fs.unlinkSync(nmSymlink); } catch {}
-
-    logStep(repoLabel, prNumber, "Committing changes", `${filesChanged.length} file(s) modified`, fixerAgent);
+    logHistoryStep("Committing changes", `${filesChanged.length} file(s) modified`);
     await execAsync("git add -A", { cwd: workDir });
     const commitMsgFile = path.join(os.tmpdir(), `commit-msg-${Date.now()}.txt`);
     fs.writeFileSync(commitMsgFile, commitMessage, "utf-8");
@@ -811,7 +1005,7 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
       try { fs.unlinkSync(commitMsgFile); } catch {}
     }
 
-    logStep(repoLabel, prNumber, "Pushing to remote", `origin/${branch}`, fixerAgent);
+    logHistoryStep("Pushing to remote", `origin/${branch}`);
     await execAsync(`git push origin HEAD:refs/heads/${branch}`, {
       cwd: workDir,
       timeout: 60000,
@@ -822,8 +1016,8 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
     });
     const commitHash = hashOutput.trim();
 
-    logStep(repoLabel, prNumber, "Fix complete", `${agentLabel} created commit ${commitHash}`, fixerAgent);
-    logDone(repoLabel, prNumber);
+    logHistoryStep("Fix complete", `${agentLabel} created commit ${commitHash}`);
+    completeHistory(`${agentLabel} created commit ${commitHash}`);
 
     const fixedAt = new Date().toISOString();
 
@@ -836,7 +1030,7 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
     }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logError(repoLabel, prNumber, msg);
+    failHistory(msg);
     throw err;
   } finally {
     await cleanup();

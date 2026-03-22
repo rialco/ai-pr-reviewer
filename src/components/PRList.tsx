@@ -117,11 +117,11 @@ function RepoSection({
   children: ReactNode;
 }) {
   return (
-    <section className="overflow-hidden rounded-xl border border-border/70 bg-surface/70">
+    <section className="border-b border-border/60 last:border-b-0">
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2.5 px-3 py-3 text-left transition-colors hover:bg-muted/25"
+        className="flex w-full items-center gap-2.5 px-4 py-3 text-left transition-colors hover:bg-muted/20"
         aria-expanded={!collapsed}
       >
         <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-border/70 bg-muted/20 text-muted-foreground">
@@ -149,7 +149,7 @@ function RepoSection({
         style={{ gridTemplateRows: collapsed ? "0fr" : "1fr", opacity: collapsed ? 0.7 : 1 }}
       >
         <div className="overflow-hidden">
-          <div className="border-t border-border/60 px-2 py-1">
+          <div className="border-t border-border/50 px-3 py-2">
             {children}
           </div>
         </div>
@@ -197,7 +197,7 @@ export function PRList({ onSelectPR, selectedPR }: PRListProps) {
   }
 
   return (
-    <div className="space-y-3">
+    <div>
       {repoEntries.map(([repo, repoPRs]) => {
         const repoSelected = selectedPR?.repo === repo;
         const collapsed = collapsedRepos[repo] ?? false;
@@ -216,53 +216,60 @@ export function PRList({ onSelectPR, selectedPR }: PRListProps) {
               }))
             }
           >
-            {repoPRs.map((pr) => {
-              const isSelected =
-                selectedPR?.repo === pr.repo &&
-                selectedPR?.prNumber === pr.number;
+            <div className="space-y-2">
+              {repoPRs.map((pr) => {
+                const isSelected =
+                  selectedPR?.repo === pr.repo &&
+                  selectedPR?.prNumber === pr.number;
 
-              return (
-                <div
-                  key={`${pr.repo}-${pr.number}`}
-                  className={cn(
-                    "group flex items-start gap-3 rounded-md px-2 py-2 transition-all duration-150",
-                    isSelected
-                      ? "bg-primary/10 opacity-100"
-                      : "opacity-60 hover:bg-muted/20 hover:opacity-100",
-                  )}
-                >
-                  <button
-                    type="button"
-                    onClick={() => onSelectPR(pr.repo, pr.number)}
-                    className="min-w-0 flex-1 text-left"
+                return (
+                  <div
+                    key={`${pr.repo}-${pr.number}`}
+                    className={cn(
+                      "group flex items-start gap-3 rounded-xl border px-3 py-3 transition-all duration-150",
+                      isSelected
+                        ? "border-primary/30 bg-primary/10 opacity-100"
+                        : "border-transparent opacity-70 hover:border-border/70 hover:bg-muted/20 hover:opacity-100",
+                    )}
                   >
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium truncate">{pr.title}</p>
-                      <div className="mt-1 flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">#{pr.number}</Badge>
-                        <span className="text-xs text-muted-foreground/90">
-                          {pr.headRefName}
-                        </span>
-                      </div>
-                      <PRStatusIndicator repo={pr.repo} prNumber={pr.number} />
-                    </div>
-                  </button>
-                  <div className="flex shrink-0 flex-col items-end gap-2 pt-0.5">
-                    <CoordinatorChecklistToggle repo={pr.repo} prNumber={pr.number} />
-                    <a
-                      href={pr.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      className="p-1 text-muted-foreground transition-colors hover:text-foreground"
-                      title="Open pull request on GitHub"
+                    <button
+                      type="button"
+                      onClick={() => onSelectPR(pr.repo, pr.number)}
+                      className="min-w-0 flex-1 text-left"
                     >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
+                      <div className="min-w-0">
+                        <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+                          <Badge
+                            variant="outline"
+                            className="row-span-2 min-h-11 items-center self-stretch px-2.5 text-sm font-semibold"
+                          >
+                            #{pr.number}
+                          </Badge>
+                          <p className="truncate text-sm font-medium">{pr.title}</p>
+                          <span className="truncate text-xs text-muted-foreground/90">
+                            {pr.headRefName}
+                          </span>
+                        </div>
+                        <PRStatusIndicator repo={pr.repo} prNumber={pr.number} />
+                      </div>
+                    </button>
+                    <div className="flex shrink-0 flex-col items-end gap-2 pt-0.5">
+                      <CoordinatorChecklistToggle repo={pr.repo} prNumber={pr.number} />
+                      <a
+                        href={pr.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="p-1 text-muted-foreground transition-colors hover:text-foreground"
+                        title="Open pull request on GitHub"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </RepoSection>
         );
       })}

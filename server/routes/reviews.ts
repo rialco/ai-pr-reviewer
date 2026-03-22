@@ -28,6 +28,7 @@ import { pollPR } from "../services/poller.js";
 import { startJob, updateJobStep, completeJob, failJob } from "../services/jobs.js";
 import { formatGitHubCommentBody } from "../infrastructure/reviewers/reviewPrompt.js";
 import { fixComments, isFixerAgentAvailable, type FixerAgent } from "../services/fixer.js";
+import { RunHistoryTracker } from "../services/runHistory.js";
 import {
   analyzeComments,
   getAnalyzerAgentLabel,
@@ -138,6 +139,13 @@ async function analyzeLocalReviewComments(options: {
       requestSource: "local_review_comments",
     },
   );
+  const timelineHistory = new RunHistoryTracker({
+    detail: `${analyzerLabel} triaging ${pending.length} local review comment(s)`,
+    onUpdate: (history) => {
+      updateTimelineEventDebug(analysisRequestedEventId, { history });
+    },
+  });
+  timelineHistory.publish();
 
   const previousStatuses = new Map(pending.map((comment) => [comment.id, comment.status]));
   for (const comment of pending) {
@@ -149,7 +157,15 @@ async function analyzeLocalReviewComments(options: {
       mapLocalCommentsToBotComments(pending, options.pr),
       options.repoConfig,
       analyzerAgent,
-      options.onProgress,
+      (event) => {
+        options.onProgress?.(event);
+        if (event.type !== "progress") return;
+        if (event.step === "claude_output" || event.step === "codex_output") {
+          timelineHistory.output(event.message);
+          return;
+        }
+        timelineHistory.step(event.message, event.detail);
+      },
       (debugDetail) => {
         updateTimelineEventDebug(analysisRequestedEventId, debugDetail);
         options.onDebug?.(debugDetail);
@@ -173,12 +189,14 @@ async function analyzeLocalReviewComments(options: {
       source: "local_review_comments",
       reviewerId: options.reviewerId ?? null,
     });
+    timelineHistory.complete(`${analyzerLabel} triaged ${results.length} local review comment(s)`);
 
     return { analyzed: results.length, analyzerAgent };
   } catch (error) {
     for (const comment of pending) {
       updateLocalCommentStatus(comment.id, previousStatuses.get(comment.id) ?? "new");
     }
+    timelineHistory.fail(String(error));
     throw error;
   }
 }
@@ -291,6 +309,13 @@ router.post("/:repo/:prNumber/request", async (req, res) => {
     reviewerId,
     detail: `${reviewer.displayName} reviewing PR #${prNumber}`,
   });
+  const timelineHistory = new RunHistoryTracker({
+    detail: `${reviewer.displayName} reviewing PR #${prNumber}`,
+    onUpdate: (history) => {
+      updateTimelineEventDebug(reviewRequestedEventId, { history });
+    },
+  });
+  timelineHistory.publish();
 
   // Set up NDJSON streaming
   res.writeHead(200, {
@@ -318,8 +343,10 @@ router.post("/:repo/:prNumber/request", async (req, res) => {
         // Mirror to job tracker
         if (event.step === "claude_output" || event.step === "codex_output") {
           // skip verbose output for job tracker
+          return;
         } else {
           updateJobStep(jobId, event.message, event.detail);
+          timelineHistory.step(event.message, event.detail);
         }
       },
       (debugDetail) => {
@@ -340,6 +367,7 @@ router.post("/:repo/:prNumber/request", async (req, res) => {
           detail: "Filtering out stale, already-addressed, and low-value comments before they become actionable.",
         });
         updateJobStep(jobId, `Triaging ${review.comments.length} local review comment(s)`, analyzerLabel);
+        timelineHistory.step(`Triaging ${review.comments.length} local review comment(s)`, analyzerLabel);
 
         try {
           await analyzeLocalReviewComments({
@@ -366,6 +394,7 @@ router.post("/:repo/:prNumber/request", async (req, res) => {
                 return;
               }
               updateJobStep(jobId, event.message, event.detail);
+              timelineHistory.step(event.message, event.detail);
             },
             onDebug: (debugDetail) => {
               updateTimelineEventDebug(reviewRequestedEventId, {
@@ -393,6 +422,7 @@ router.post("/:repo/:prNumber/request", async (req, res) => {
 
     const score = review.confidenceScore !== null ? ` — ${review.confidenceScore}/5` : "";
     completeJob(jobId, `${reviewer.displayName} review complete${score}`);
+    timelineHistory.complete(`${reviewer.displayName} review complete${score}`);
 
     recordTimelineEvent(repoLabel, prNumber, "review_completed", {
       reviewerId,
@@ -405,6 +435,7 @@ router.post("/:repo/:prNumber/request", async (req, res) => {
     res.end();
   } catch (err) {
     failJob(jobId, String(err));
+    timelineHistory.fail(String(err));
 
     recordTimelineEvent(repoLabel, prNumber, "review_failed", {
       reviewerId,
@@ -747,6 +778,9 @@ router.post("/:repo/:prNumber/local-comments/fix", async (req, res) => {
     commentStates,
     onDebug: (debugDetail) => {
       updateTimelineEventDebug(localFixStartedEventId, debugDetail);
+    },
+    onHistoryUpdate: (history) => {
+      updateTimelineEventDebug(localFixStartedEventId, { history });
     },
   })
     .then((results) => {

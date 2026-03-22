@@ -57,6 +57,7 @@ import {
   failAnalysisJob,
   getActivityFeed,
 } from "../services/jobs.js";
+import { RunHistoryTracker } from "../services/runHistory.js";
 import { executeSuggestedNextStep, getSuggestedNextStep } from "../services/workflow.js";
 
 const router = Router();
@@ -263,6 +264,7 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
     analyzerAgent,
     `${analyzerLabel} analyzing ${toAnalyze.length} comment(s)`,
   );
+  let timelineHistory: RunHistoryTracker | null = null;
 
   try {
     const analysisRequestedEventId = recordTimelineEvent(
@@ -285,6 +287,13 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
         commentIds: toAnalyze.map((c) => c.id),
       },
     );
+    timelineHistory = new RunHistoryTracker({
+      detail: `${analyzerLabel} analyzing ${toAnalyze.length} comment(s)`,
+      onUpdate: (history) => {
+        updateTimelineEventDebug(analysisRequestedEventId, { history });
+      },
+    });
+    timelineHistory.publish();
 
     const results = await analyzeComments(
       toAnalyze,
@@ -295,8 +304,10 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
         // Mirror progress to the server-side job tracker
         if (event.step === "claude_output" || event.step === "codex_output") {
           addAnalysisOutput(jobId, repoLabel, prNumber, event.message);
+          timelineHistory?.output(event.message);
         } else {
           updateAnalysisStep(jobId, repoLabel, prNumber, event.message, event.detail);
+          timelineHistory?.step(event.message, event.detail);
         }
       },
       (debugDetail) => {
@@ -321,6 +332,7 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
     });
 
     completeAnalysisJob(jobId);
+    timelineHistory?.complete(`${analyzerLabel} analyzed ${results.length} comment(s)`);
     sendEvent({ type: "complete", analyzed: results.length, results });
     res.end();
   } catch (err) {
@@ -329,6 +341,7 @@ router.post("/:repo/:prNumber/analyze", async (req, res) => {
       updateCommentStatus(repoLabel, c.id, "new");
     }
     failAnalysisJob(jobId, String(err));
+    timelineHistory?.fail(String(err));
     sendEvent({ type: "error", message: String(err) });
     res.end();
   }
@@ -477,6 +490,9 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
     requestReReview: shouldReReview,
     onDebug: (debugDetail) => {
       updateTimelineEventDebug(fixStartedEventId, debugDetail);
+    },
+    onHistoryUpdate: (history) => {
+      updateTimelineEventDebug(fixStartedEventId, { history });
     },
   })
     .then((results) => {

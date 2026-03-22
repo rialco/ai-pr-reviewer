@@ -23,6 +23,7 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 
 interface ReviewScoreboardProps {
@@ -91,7 +92,7 @@ function SummaryDialog({
   const accent = scoreAccent(score);
   const hasBothTabs = !!rawOutput;
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="fixed inset-0 bg-black/60 backdrop-blur-[2px]" onClick={onClose} />
       <div className="relative z-50 w-full max-w-2xl rounded-xl border border-border bg-background shadow-2xl overflow-hidden">
@@ -146,7 +147,8 @@ function SummaryDialog({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

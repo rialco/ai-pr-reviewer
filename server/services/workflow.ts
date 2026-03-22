@@ -483,7 +483,7 @@ async function runCoordinatorPass(): Promise<void> {
   }
 }
 
-export function startWorkflowCoordinator(intervalMs = 3 * 60 * 1000): void {
+export function startWorkflowCoordinator(intervalMs = 30 * 1000): void {
   registerScheduledEvent(
     COORDINATOR_SCHEDULE_ID,
     "coordinator",

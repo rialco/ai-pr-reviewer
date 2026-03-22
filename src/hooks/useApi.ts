@@ -115,6 +115,16 @@ export interface FixProgress {
   finishedAt?: string;
 }
 
+export interface TimelineRunHistory {
+  status: "running" | "done" | "error";
+  startedAt: string;
+  finishedAt?: string;
+  currentStep?: string;
+  detail?: string;
+  steps: FixLogEntry[];
+  output: string[];
+}
+
 export interface PRStatus {
   phase: "polled" | "analyzed" | "fixing" | "fixed" | "merge_ready" | "re_review_requested" | "waiting_for_review";
   reviewCycle: number;
@@ -169,6 +179,7 @@ export function useAddRepo() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["repos"] });
       qc.invalidateQueries({ queryKey: ["prs"] });
+      qc.invalidateQueries({ queryKey: ["summary"] });
     },
   });
 }
@@ -180,7 +191,10 @@ export function useRemoveRepo() {
       fetchJson("/api/repos/" + encodeURIComponent(label) + (hard ? "?hard=true" : ""), {
         method: "DELETE",
       }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["repos"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["repos"] });
+      qc.invalidateQueries({ queryKey: ["summary"] });
+    },
   });
 }
 

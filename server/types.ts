@@ -70,6 +70,27 @@ export interface AnalysisResult {
   currentCode?: string;
 }
 
+export type RunHistoryStepStatus = "active" | "done" | "error";
+
+export interface RunHistoryStep {
+  step: string;
+  status: RunHistoryStepStatus;
+  detail?: string;
+  ts: string;
+}
+
+export type PersistedRunStatus = "running" | "done" | "error";
+
+export interface PersistedRunHistory {
+  status: PersistedRunStatus;
+  startedAt: string;
+  finishedAt?: string;
+  currentStep?: string;
+  detail?: string;
+  steps: RunHistoryStep[];
+  output: string[];
+}
+
 export interface CommentState {
   commentId: number;
   repo: string;

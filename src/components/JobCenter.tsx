@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useReducer } from "react";
 import { useJobs, type Job, type JobType, type ScheduledEvent } from "../hooks/useJobs";
 import { AgentLogo, getAgentLabel } from "./ui/agent-logo";
 import { Badge } from "./ui/badge";
+import { Popover } from "./ui/popover";
 import {
   Loader2,
   Check,
@@ -22,6 +23,8 @@ import {
 interface JobCenterProps {
   onNavigateToPR: (repo: string, prNumber: number) => void;
   lastPollAt?: string | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }
 
 // --- Icons ---
@@ -286,11 +289,9 @@ function SectionHeader({ label, count }: { label: string; count: number }) {
 
 // --- Main component ---
 
-export function JobCenter({ onNavigateToPR, lastPollAt }: JobCenterProps) {
+export function JobCenter({ onNavigateToPR, lastPollAt, open, onOpenChange }: JobCenterProps) {
   const { data: feed } = useJobs();
-  const [isOpen, setIsOpen] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
-  const containerRef = useRef<HTMLDivElement>(null);
   // Force re-render while visible countdowns are on screen so times stay live.
   const [, tick] = useReducer((x: number) => x + 1, 0);
   const allJobs = (feed?.jobs ?? []).filter((j) => !dismissed.has(j.id));
@@ -299,7 +300,7 @@ export function JobCenter({ onNavigateToPR, lastPollAt }: JobCenterProps) {
   const recent = allJobs.filter((j) => j.status !== "running");
   const totalItems = running.length + recent.length + scheduled.length;
   const nextScheduled = scheduled[0] ?? null;
-  const shouldTick = isOpen || running.length > 0 || scheduled.length > 0;
+  const shouldTick = open || running.length > 0 || scheduled.length > 0;
 
   useEffect(() => {
     if (!shouldTick) return;
@@ -307,37 +308,14 @@ export function JobCenter({ onNavigateToPR, lastPollAt }: JobCenterProps) {
     return () => clearInterval(id);
   }, [shouldTick]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-
-    function handlePointerDown(event: MouseEvent) {
-      if (!containerRef.current?.contains(event.target as Node)) {
-        setIsOpen(false);
-      }
-    }
-
-    function handleEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setIsOpen(false);
-      }
-    }
-
-    document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleEscape);
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleEscape);
-    };
-  }, [isOpen]);
-
   // Auto-open when a new running job appears
   const prevRunningRef = useRef(0);
   useEffect(() => {
     if (running.length > prevRunningRef.current && running.length > 0) {
-      setIsOpen(true);
+      onOpenChange(true);
     }
     prevRunningRef.current = running.length;
-  }, [running.length]);
+  }, [running.length, onOpenChange]);
 
   const isRunning = running.length > 0;
   const hasScheduled = scheduled.length > 0;
@@ -369,163 +347,156 @@ export function JobCenter({ onNavigateToPR, lastPollAt }: JobCenterProps) {
         : "No recent poll data";
 
   return (
-    <div className="border-t border-border bg-card/60 p-3">
-      <div
-        ref={containerRef}
-        className={[
-          `relative overflow-visible rounded-xl border ${shellBorder} ${shellBg} transition-all duration-200`,
-          isRunning ? "animate-breathe shadow-lg" : "shadow-lg shadow-black/10",
-        ].join(" ")}
-        style={isRunning ? { "--breathe-color": "rgba(109, 91, 247, 0.22)" } as React.CSSProperties : undefined}
-      >
-        <button
-          onClick={() => setIsOpen(!isOpen)}
-          className={[
-            "flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors",
-            isOpen ? "bg-muted/20" : "hover:bg-muted/20",
-          ].join(" ")}
-        >
-          <div
-            className={[
-              "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-colors",
-              isRunning
-                ? "border-primary/30 bg-primary/10 text-primary"
-                : hasScheduled
-                  ? "border-primary/15 bg-primary/5 text-primary/80"
-                  : "border-border bg-muted/40 text-muted-foreground",
-            ].join(" ")}
-          >
-            {isRunning ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Activity className="h-4 w-4" />
+    <Popover
+      open={open}
+      onOpenChange={onOpenChange}
+      className="min-w-0"
+      contentContainerClassName="fixed bottom-1 left-[calc(340px+8px)]"
+      contentClassName="max-h-[calc(100vh-0.5rem)] w-[26rem] overflow-hidden"
+      content={
+        <div className="space-y-2 p-2.5">
+          <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 bg-background/20 px-3 py-2.5">
+            <div className="min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+                Heartbeat
+              </p>
+              <p className="mt-1 text-xs text-foreground/90">
+                {nextScheduled ? nextScheduled.description : "No scheduled checks"}
+              </p>
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                {lastPollAt ? `Last poll ${formatAbsoluteTime(lastPollAt)}` : "No poll recorded yet"}
+              </p>
+            </div>
+            <div className="shrink-0 text-right">
+              <p className="text-xs font-medium text-primary">
+                {nextScheduled ? formatCountdown(nextScheduled.nextRunAt) : "Idle"}
+              </p>
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                {nextScheduled ? formatInterval(nextScheduled.intervalMs) : "waiting"}
+              </p>
+            </div>
+          </div>
+
+          <div className="max-h-[320px] space-y-0.5 overflow-y-auto pr-0.5">
+            {scheduled.length > 0 && (
+              <>
+                <SectionHeader label="Upcoming" count={scheduled.length} />
+                {scheduled.map((event) => (
+                  <ScheduledEventCard key={event.id} event={event} />
+                ))}
+              </>
+            )}
+
+            {running.length > 0 && (
+              <>
+                <SectionHeader label="Running" count={running.length} />
+                {running.map((job) => (
+                  <JobCard
+                    key={job.id}
+                    job={job}
+                    onNavigate={() => {
+                      if (job.prNumber) onNavigateToPR(job.repo, job.prNumber);
+                    }}
+                  />
+                ))}
+              </>
+            )}
+
+            {recent.length > 0 && (
+              <>
+                <SectionHeader label="Recent" count={recent.length} />
+                {recent.map((job) => (
+                  <JobCard
+                    key={job.id}
+                    job={job}
+                    onNavigate={() => {
+                      if (job.prNumber) onNavigateToPR(job.repo, job.prNumber);
+                    }}
+                  />
+                ))}
+              </>
+            )}
+
+            {totalItems === 0 && (
+              <div className="rounded-md border border-dashed border-border/70 px-3 py-4 text-center text-[11px] text-muted-foreground">
+                No activity yet
+              </div>
             )}
           </div>
 
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-                Activity Monitor
-              </span>
-              {isRunning ? (
-                <Badge variant="default" className="shrink-0 px-1.5 py-0 text-[10px]">
-                  Live
-                </Badge>
-              ) : null}
+          {recent.length > 0 && (
+            <div className="flex justify-end border-t border-border/60 pt-2">
+              <button
+                onClick={() => {
+                  const ids = recent.map((j) => j.id);
+                  setDismissed((prev) => {
+                    const next = new Set(prev);
+                    for (const id of ids) next.add(id);
+                    return next;
+                  });
+                }}
+                className="text-[10px] text-muted-foreground hover:text-foreground"
+              >
+                Clear completed
+              </button>
             </div>
-            <p className="mt-1 truncate text-sm font-medium text-foreground/95">
-              {headline}
-            </p>
-            <p className="mt-0.5 truncate whitespace-nowrap text-[11px] text-muted-foreground">
-              {subheadline}
-            </p>
-          </div>
-
-          <ChevronDown
-            className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${
-              isOpen ? "rotate-180" : ""
-            }`}
-          />
-        </button>
-
+          )}
+        </div>
+      }
+    >
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => onOpenChange(!open)}
+        className={[
+          `flex w-full items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition-colors ${shellBorder} ${shellBg}`,
+          isRunning ? "animate-breathe shadow-lg" : "shadow-lg shadow-black/10",
+          open ? "bg-muted/20" : "hover:bg-muted/20",
+        ].join(" ")}
+        style={isRunning ? { "--breathe-color": "rgba(109, 91, 247, 0.22)" } as React.CSSProperties : undefined}
+      >
         <div
           className={[
-            "pointer-events-none fixed bottom-0 left-[calc(340px+12px)] z-50 w-[26rem] transition-all duration-200 ease-out",
-            isOpen ? "translate-x-0 opacity-100" : "translate-x-1 opacity-0",
+            "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition-colors",
+            isRunning
+              ? "border-primary/30 bg-primary/10 text-primary"
+              : hasScheduled
+                ? "border-primary/15 bg-primary/5 text-primary/80"
+                : "border-border bg-muted/40 text-muted-foreground",
           ].join(" ")}
         >
-          <div className="pointer-events-auto overflow-hidden rounded-t-xl border border-b-0 border-border bg-card shadow-2xl shadow-black/35">
-            <div className="max-h-[calc(100vh-12px)] space-y-2 overflow-y-auto p-2.5">
-              <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 bg-background/20 px-3 py-2.5">
-                <div className="min-w-0">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-                    Heartbeat
-                  </p>
-                  <p className="mt-1 text-xs text-foreground/90">
-                    {nextScheduled ? nextScheduled.description : "No scheduled checks"}
-                  </p>
-                  <p className="mt-1 text-[10px] text-muted-foreground">
-                    {lastPollAt ? `Last poll ${formatAbsoluteTime(lastPollAt)}` : "No poll recorded yet"}
-                  </p>
-                </div>
-                <div className="shrink-0 text-right">
-                  <p className="text-xs font-medium text-primary">
-                    {nextScheduled ? formatCountdown(nextScheduled.nextRunAt) : "Idle"}
-                  </p>
-                  <p className="mt-1 text-[10px] text-muted-foreground">
-                    {nextScheduled ? formatInterval(nextScheduled.intervalMs) : "waiting"}
-                  </p>
-                </div>
-              </div>
-
-              <div className="max-h-[320px] space-y-0.5 overflow-y-auto pr-0.5">
-                {scheduled.length > 0 && (
-                  <>
-                    <SectionHeader label="Upcoming" count={scheduled.length} />
-                    {scheduled.map((event) => (
-                      <ScheduledEventCard key={event.id} event={event} />
-                    ))}
-                  </>
-                )}
-
-                {running.length > 0 && (
-                  <>
-                    <SectionHeader label="Running" count={running.length} />
-                    {running.map((job) => (
-                      <JobCard
-                        key={job.id}
-                        job={job}
-                        onNavigate={() => {
-                          if (job.prNumber) onNavigateToPR(job.repo, job.prNumber);
-                        }}
-                      />
-                    ))}
-                  </>
-                )}
-
-                {recent.length > 0 && (
-                  <>
-                    <SectionHeader label="Recent" count={recent.length} />
-                    {recent.map((job) => (
-                      <JobCard
-                        key={job.id}
-                        job={job}
-                        onNavigate={() => {
-                          if (job.prNumber) onNavigateToPR(job.repo, job.prNumber);
-                        }}
-                      />
-                    ))}
-                  </>
-                )}
-
-                {totalItems === 0 && (
-                  <div className="rounded-md border border-dashed border-border/70 px-3 py-4 text-center text-[11px] text-muted-foreground">
-                    No activity yet
-                  </div>
-                )}
-              </div>
-
-              {recent.length > 0 && (
-                <div className="flex justify-end border-t border-border/60 pt-2">
-                  <button
-                    onClick={() => {
-                      const ids = recent.map((j) => j.id);
-                      setDismissed((prev) => {
-                        const next = new Set(prev);
-                        for (const id of ids) next.add(id);
-                        return next;
-                      });
-                    }}
-                    className="text-[10px] text-muted-foreground hover:text-foreground"
-                  >
-                    Clear completed
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
+          {isRunning ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Activity className="h-3.5 w-3.5" />
+          )}
         </div>
-      </div>
-    </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+              Activity
+            </span>
+            {isRunning ? (
+              <Badge variant="default" className="shrink-0 px-1.5 py-0 text-[10px]">
+                Live
+              </Badge>
+            ) : null}
+          </div>
+          <p className="truncate text-xs font-medium text-foreground/95">
+            {headline}
+          </p>
+          <p className="truncate text-[10px] text-muted-foreground">
+            {subheadline}
+          </p>
+        </div>
+
+        <ChevronDown
+          className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${
+            open ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+    </Popover>
   );
 }

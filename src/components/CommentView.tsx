@@ -1,4 +1,4 @@
-import { usePRComments, useAnalyze, useDismiss, useReopen, useRecategorize, useFixComments, useRevertFix, useReplyToComments, usePRStatus, useRefreshPR, useReviewComments, usePublishReview, useAvailableReviewers, useDismissLocalComment, useDeleteLocalComment, useRecategorizeLocalComment, useAnalyzeLocalReviewComments, useFixLocalComments, useResetLocalComments, useTimeline, useTimelineEvent, useRequestReview, useRefreshReview, useSettings, useSuggestedNextStep, useExecuteSuggestedNextStep, useCoordinatorPRPreference, useUpdateCoordinatorPRPreference, type EnrichedComment, type AnalysisProgressState, type FixProgress, type ReviewCommentData, type TimelineEvent, type AnalyzerAgent, type FixerAgent } from "../hooks/useApi";
+import { usePRComments, useAnalyze, useDismiss, useReopen, useRecategorize, useFixComments, useRevertFix, useReplyToComments, usePRStatus, useRefreshPR, useReviewComments, usePublishReview, useAvailableReviewers, useDismissLocalComment, useDeleteLocalComment, useRecategorizeLocalComment, useAnalyzeLocalReviewComments, useFixLocalComments, useResetLocalComments, useTimeline, useTimelineEvent, useRequestReview, useRefreshReview, useSettings, useSuggestedNextStep, useExecuteSuggestedNextStep, useCoordinatorPRPreference, useUpdateCoordinatorPRPreference, type EnrichedComment, type AnalysisProgressState, type FixProgress, type ReviewCommentData, type TimelineEvent, type TimelineRunHistory, type AnalyzerAgent, type FixerAgent } from "../hooks/useApi";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { MarkdownBody } from "./MarkdownBody";
@@ -35,6 +35,7 @@ import {
   ArrowRight,
 } from "lucide-react";
 import { useState, useRef, useEffect, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 
 interface CommentViewProps {
@@ -213,6 +214,16 @@ function formatTimelineRange(startDate: string, endDate: string): string {
   }
 
   return `${formatAbsoluteTime(startDate)} -> ${formatAbsoluteTime(endDate)}`;
+}
+
+function getTimelineRunHistory(debugDetail: Record<string, unknown> | null): TimelineRunHistory | null {
+  const raw = debugDetail?.history;
+  if (!raw || typeof raw !== "object") return null;
+  const candidate = raw as Partial<TimelineRunHistory>;
+  if (!Array.isArray(candidate.steps) || !Array.isArray(candidate.output) || typeof candidate.startedAt !== "string") {
+    return null;
+  }
+  return candidate as TimelineRunHistory;
 }
 
 function LocalAgentSelector({
@@ -1306,7 +1317,7 @@ function TimelineEventDetailsDialog({
 }) {
   const open = event !== null;
   const { data, isLoading, error } = useTimelineEvent(repo, prNumber, event?.id ?? null, open);
-  const [activeTab, setActiveTab] = useState<"parameters" | "prompt">("parameters");
+  const [activeTab, setActiveTab] = useState<"history" | "parameters" | "prompt">("history");
 
   useEffect(() => {
     if (!open) return;
@@ -1318,7 +1329,7 @@ function TimelineEventDetailsDialog({
   }, [open, onClose]);
 
   useEffect(() => {
-    setActiveTab("parameters");
+    setActiveTab("history");
   }, [event?.id]);
 
   if (!open || !event) return null;
@@ -1328,13 +1339,14 @@ function TimelineEventDetailsDialog({
   const Icon = config.icon;
   const detail = formatTimelineDetail(resolvedEvent);
   const debugDetail = data?.debugDetail ?? null;
+  const history = getTimelineRunHistory(debugDetail);
   const prompt = typeof debugDetail?.prompt === "string" ? debugDetail.prompt : null;
   const parameters = debugDetail
-    ? Object.fromEntries(Object.entries(debugDetail).filter(([key]) => key !== "prompt"))
+    ? Object.fromEntries(Object.entries(debugDetail).filter(([key]) => key !== "prompt" && key !== "history"))
     : null;
   const hasParameters = parameters && Object.keys(parameters).length > 0;
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="fixed inset-0 bg-black/55" onClick={onClose} />
       <div className="relative z-50 flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-border bg-background shadow-2xl">
@@ -1359,6 +1371,14 @@ function TimelineEventDetailsDialog({
         </div>
 
         <div className="flex items-center gap-2 border-b border-border px-5 py-3">
+          <Button
+            variant={activeTab === "history" ? "secondary" : "outline"}
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => setActiveTab("history")}
+          >
+            History
+          </Button>
           <Button
             variant={activeTab === "parameters" ? "secondary" : "outline"}
             size="sm"
@@ -1392,6 +1412,87 @@ function TimelineEventDetailsDialog({
             <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
               Debug details are not available for this event yet.
             </div>
+          ) : activeTab === "history" ? (
+            history ? (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className={cn(
+                      "h-6 px-2.5 text-[10px] uppercase tracking-wide",
+                      history.status === "error"
+                        ? "border-destructive/30 text-destructive"
+                        : history.status === "done"
+                          ? "border-emerald-500/30 text-emerald-400"
+                          : "border-primary/30 text-primary",
+                    )}
+                  >
+                    {history.status}
+                  </Badge>
+                  <span className="text-xs text-muted-foreground/80">
+                    Started {new Date(history.startedAt).toLocaleString()}
+                  </span>
+                  <span className="text-xs text-muted-foreground/80">
+                    Duration {formatDuration(history.startedAt, history.finishedAt ?? new Date().toISOString())}
+                  </span>
+                </div>
+
+                {history.steps.length > 0 ? (
+                  <div className="rounded-lg border border-border bg-surface/80">
+                    <div className="border-b border-border px-4 py-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                      Steps
+                    </div>
+                    <div className="divide-y divide-border/60">
+                      {history.steps.map((step, index) => (
+                        <div key={`${step.ts}-${index}`} className="flex items-start gap-2 px-4 py-3">
+                          {step.status === "done" ? (
+                            <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                          ) : step.status === "error" ? (
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+                          ) : (
+                            <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-sm text-foreground/90">{step.step}</span>
+                              <span className="text-[11px] tabular-nums text-muted-foreground/60">
+                                {new Date(step.ts).toLocaleTimeString([], {
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                  second: "2-digit",
+                                })}
+                              </span>
+                            </div>
+                            {step.detail && (
+                              <p className="mt-1 text-xs leading-5 text-muted-foreground/80">{step.detail}</p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
+                    Run history has not captured any step transitions yet.
+                  </div>
+                )}
+
+                {history.output.length > 0 && (
+                  <div className="rounded-lg border border-border bg-surface/80">
+                    <div className="border-b border-border px-4 py-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                      Output
+                    </div>
+                    <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-[11px] leading-5 text-foreground/78">
+                      {history.output.join("\n")}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
+                Run history is not available for this event yet.
+              </div>
+            )
           ) : activeTab === "prompt" ? (
             prompt ? (
               <pre className="overflow-x-auto rounded-lg border border-border bg-surface p-4 text-xs leading-6 text-foreground/80 whitespace-pre-wrap break-words">
@@ -1413,7 +1514,8 @@ function TimelineEventDetailsDialog({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
