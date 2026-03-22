@@ -12,7 +12,7 @@ import type {
   CommentState,
 } from "../types.js";
 import { DEFAULT_BOT_USERS } from "../types.js";
-import type { Review, ReviewerId } from "../domain/review/types.js";
+import type { Review, ReviewComment, ReviewerId } from "../domain/review/types.js";
 
 const DB_PATH = path.join(import.meta.dirname, "../../data/pr-reviewer.db");
 
@@ -56,6 +56,7 @@ function migrate(db: Database.Database): void {
       status TEXT NOT NULL DEFAULT 'new',
       analysis_category TEXT,
       analysis_reasoning TEXT,
+      analysis_details TEXT,
       fix_files_changed TEXT,
       fix_commit_hash TEXT,
       fix_commit_message TEXT,
@@ -107,6 +108,50 @@ function migrate(db: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_reviews_pr ON reviews (repo, pr_number);
+
+    CREATE TABLE IF NOT EXISTS review_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repo TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      reviewer_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      line INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      suggestion TEXT,
+      review_details TEXT,
+      status TEXT NOT NULL DEFAULT 'new',
+      analysis_category TEXT NOT NULL DEFAULT 'UNTRIAGED',
+      analysis_reasoning TEXT,
+      analysis_details TEXT,
+      published_at TEXT,
+      superseded_at TEXT,
+      fix_commit_hash TEXT,
+      fix_files_changed TEXT,
+      fix_fixed_at TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_review_comments_pr ON review_comments (repo, pr_number, reviewer_id);
+
+    CREATE TABLE IF NOT EXISTS pr_timeline (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repo TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '{}',
+      debug_detail TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pr_timeline_pr ON pr_timeline (repo, pr_number, created_at);
+
+    CREATE TABLE IF NOT EXISTS coordinator_pr_preferences (
+      repo TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      ignored INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (repo, pr_number)
+    );
   `);
 
   // Add run_history column if missing
@@ -133,6 +178,34 @@ function migrate(db: Database.Database): void {
   // Add deleted_at column for soft delete
   try {
     db.exec("ALTER TABLE repos ADD COLUMN deleted_at TEXT");
+  } catch {
+    // Column already exists
+  }
+
+  // Add status/category/fix columns to review_comments if missing
+  for (const col of [
+    "review_details TEXT",
+    "status TEXT NOT NULL DEFAULT 'new'",
+    "analysis_category TEXT NOT NULL DEFAULT 'UNTRIAGED'",
+    "analysis_reasoning TEXT",
+    "analysis_details TEXT",
+    "superseded_at TEXT",
+    "fix_commit_hash TEXT",
+    "fix_files_changed TEXT",
+    "fix_fixed_at TEXT",
+  ]) {
+    try { db.exec(`ALTER TABLE review_comments ADD COLUMN ${col}`); } catch { /* exists */ }
+  }
+
+  for (const col of [
+    "analysis_details TEXT",
+  ]) {
+    try { db.exec(`ALTER TABLE comments ADD COLUMN ${col}`); } catch { /* exists */ }
+  }
+
+  // Add debug detail storage for timeline events if missing
+  try {
+    db.exec("ALTER TABLE pr_timeline ADD COLUMN debug_detail TEXT");
   } catch {
     // Column already exists
   }
@@ -335,6 +408,7 @@ export function hardRemoveRepo(label: string): void {
     db.prepare("DELETE FROM comments WHERE repo = ?").run(label);
     db.prepare("DELETE FROM prs WHERE repo = ?").run(label);
     db.prepare("DELETE FROM reviews WHERE repo = ?").run(label);
+    db.prepare("DELETE FROM pr_timeline WHERE repo = ?").run(label);
     db.prepare("DELETE FROM repos WHERE label = ?").run(label);
   });
   tx();
@@ -363,13 +437,26 @@ export interface DBComment {
   url: string | null;
   type: "inline" | "review" | "issue_comment";
   status: string;
-  analysis: { commentId: number; category: string; reasoning: string } | null;
+  analysis: AnalysisResult | null;
   fixResult: FixResult | null;
   repliedAt: string | null;
   replyBody: string | null;
 }
 
+function parseJsonColumn<T>(value: unknown): T | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
 function rowToDBComment(row: Record<string, unknown>): DBComment {
+  const analysisDetails = parseJsonColumn<Omit<AnalysisResult, "commentId" | "category" | "reasoning">>(
+    row.analysis_details,
+  );
+
   return {
     id: row.id as number,
     repo: row.repo as string,
@@ -388,8 +475,13 @@ function rowToDBComment(row: Record<string, unknown>): DBComment {
     analysis: row.analysis_category
       ? {
           commentId: row.id as number,
-          category: row.analysis_category as string,
+          category: row.analysis_category as AnalysisResult["category"],
           reasoning: (row.analysis_reasoning as string) ?? "",
+          verdict: analysisDetails?.verdict,
+          severity: analysisDetails?.severity ?? null,
+          confidence: analysisDetails?.confidence ?? null,
+          accessMode: analysisDetails?.accessMode,
+          evidence: analysisDetails?.evidence ?? null,
         }
       : null,
     fixResult: row.fix_commit_hash
@@ -518,6 +610,12 @@ export function resetStaleFixing(): void {
   if (prResult.changes > 0) {
     console.log(`Reset ${prResult.changes} stale PR(s) from "fixing" to "analyzed"`);
   }
+  // Reset stale local review comments
+  const resetLocal = db.prepare("UPDATE review_comments SET status = 'analyzed' WHERE status = 'fixing'");
+  const localResult = resetLocal.run();
+  if (localResult.changes > 0) {
+    console.log(`Reset ${localResult.changes} stale local review comment(s) from "fixing" to "analyzed"`);
+  }
 }
 
 export function updateCommentStatus(repo: string, commentId: number, status: string): void {
@@ -529,7 +627,7 @@ export function updateCommentStatus(repo: string, commentId: number, status: str
 export function reopenComment(repo: string, commentId: number): void {
   getDB()
     .prepare(
-      "UPDATE comments SET status = 'new', analysis_category = NULL, analysis_reasoning = NULL WHERE repo = ? AND id = ?",
+      "UPDATE comments SET status = 'new', analysis_category = NULL, analysis_reasoning = NULL, analysis_details = NULL WHERE repo = ? AND id = ?",
     )
     .run(repo, commentId);
 }
@@ -545,9 +643,21 @@ export function updateCommentCategory(repo: string, commentId: number, category:
 export function updateCommentAnalysis(repo: string, commentId: number, analysis: AnalysisResult): void {
   getDB()
     .prepare(
-      "UPDATE comments SET status = 'analyzed', analysis_category = ?, analysis_reasoning = ? WHERE repo = ? AND id = ?",
+      "UPDATE comments SET status = 'analyzed', analysis_category = ?, analysis_reasoning = ?, analysis_details = ? WHERE repo = ? AND id = ?",
     )
-    .run(analysis.category, analysis.reasoning, repo, commentId);
+    .run(
+      analysis.category,
+      analysis.reasoning,
+      JSON.stringify({
+        verdict: analysis.verdict ?? null,
+        severity: analysis.severity ?? null,
+        confidence: analysis.confidence ?? null,
+        accessMode: analysis.accessMode ?? null,
+        evidence: analysis.evidence ?? null,
+      }),
+      repo,
+      commentId,
+    );
 }
 
 export function revertCommentFix(repo: string, commitHash: string): number {
@@ -652,9 +762,7 @@ export function getCommentStatesForFix(repo: string, commentIds: number[]): Comm
     repo: c.repo,
     prNumber: c.prNumber,
     status: c.status as CommentState["status"],
-    analysis: c.analysis
-      ? { commentId: c.id, category: c.analysis.category as AnalysisResult["category"], reasoning: c.analysis.reasoning }
-      : undefined,
+    analysis: c.analysis ?? undefined,
     fixResult: c.fixResult ?? undefined,
     seenAt: c.createdAt,
   }));
@@ -727,13 +835,43 @@ export function appendRunHistory(repo: string, prNumber: number, entry: unknown)
 
 // ------- Settings -------
 
+function normalizeReviewerIds(raw: unknown): AppSettings["defaultReviewerIds"] {
+  const parsed =
+    typeof raw === "string"
+      ? (() => {
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return null;
+          }
+        })()
+      : raw;
+
+  if (!Array.isArray(parsed)) return ["claude", "codex"];
+
+  const ids = parsed.filter(
+    (value): value is "greptile" | "claude" | "codex" =>
+      value === "greptile" || value === "claude" || value === "codex",
+  );
+
+  return ids.length > 0 ? [...new Set(ids)] : ["claude", "codex"];
+}
+
 export function getSettings(): AppSettings {
-  const row = getDB()
-    .prepare("SELECT value FROM settings WHERE key = 'autoReReview'")
-    .get() as { value: string } | undefined;
+  const rows = getDB()
+    .prepare(
+      "SELECT key, value FROM settings WHERE key IN ('autoReReview', 'coordinatorEnabled', 'coordinatorAgent', 'defaultAnalyzerAgent', 'defaultFixerAgent', 'defaultReviewerIds')",
+    )
+    .all() as Array<{ key: string; value: string }>;
+  const values = new Map(rows.map((row) => [row.key, row.value]));
 
   return {
-    autoReReview: row?.value === "true",
+    autoReReview: values.get("autoReReview") === "true",
+    coordinatorEnabled: values.get("coordinatorEnabled") === "true",
+    coordinatorAgent: values.get("coordinatorAgent") === "codex" ? "codex" : "claude",
+    defaultAnalyzerAgent: values.get("defaultAnalyzerAgent") === "codex" ? "codex" : "claude",
+    defaultFixerAgent: values.get("defaultFixerAgent") === "codex" ? "codex" : "claude",
+    defaultReviewerIds: normalizeReviewerIds(values.get("defaultReviewerIds")),
   };
 }
 
@@ -744,7 +882,60 @@ export function updateSettings(updates: Partial<AppSettings>): AppSettings {
       String(updates.autoReReview),
     );
   }
+  if (updates.coordinatorEnabled !== undefined) {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('coordinatorEnabled', ?)").run(
+      String(updates.coordinatorEnabled),
+    );
+  }
+  if (updates.coordinatorAgent !== undefined) {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('coordinatorAgent', ?)").run(
+      updates.coordinatorAgent === "codex" ? "codex" : "claude",
+    );
+  }
+  if (updates.defaultAnalyzerAgent !== undefined) {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('defaultAnalyzerAgent', ?)").run(
+      updates.defaultAnalyzerAgent === "codex" ? "codex" : "claude",
+    );
+  }
+  if (updates.defaultFixerAgent !== undefined) {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('defaultFixerAgent', ?)").run(
+      updates.defaultFixerAgent === "codex" ? "codex" : "claude",
+    );
+  }
+  if (updates.defaultReviewerIds !== undefined) {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('defaultReviewerIds', ?)").run(
+      JSON.stringify(normalizeReviewerIds(updates.defaultReviewerIds)),
+    );
+  }
   return getSettings();
+}
+
+export function getCoordinatorPRPreference(repo: string, prNumber: number): { ignored: boolean; updatedAt: string | null } {
+  const row = getDB()
+    .prepare("SELECT ignored, updated_at FROM coordinator_pr_preferences WHERE repo = ? AND pr_number = ?")
+    .get(repo, prNumber) as { ignored: number; updated_at: string } | undefined;
+
+  return {
+    ignored: row?.ignored === 1,
+    updatedAt: row?.updated_at ?? null,
+  };
+}
+
+export function updateCoordinatorPRPreference(
+  repo: string,
+  prNumber: number,
+  ignored: boolean,
+): { ignored: boolean; updatedAt: string } {
+  const updatedAt = new Date().toISOString();
+  getDB()
+    .prepare(
+      `INSERT INTO coordinator_pr_preferences (repo, pr_number, ignored, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(repo, pr_number) DO UPDATE SET ignored = excluded.ignored, updated_at = excluded.updated_at`,
+    )
+    .run(repo, prNumber, ignored ? 1 : 0, updatedAt);
+
+  return { ignored, updatedAt };
 }
 
 // ------- Poll -------
@@ -818,6 +1009,8 @@ export function cleanupClosedPRComments(repo: string, openPRNumbers: number[]): 
   db.prepare(`DELETE FROM prs WHERE repo = ? AND pr_number NOT IN (${placeholders})`)
     .run(repo, ...openPRNumbers);
   db.prepare(`DELETE FROM reviews WHERE repo = ? AND pr_number NOT IN (${placeholders})`)
+    .run(repo, ...openPRNumbers);
+  db.prepare(`DELETE FROM pr_timeline WHERE repo = ? AND pr_number NOT IN (${placeholders})`)
     .run(repo, ...openPRNumbers);
   return result.changes;
 }
@@ -922,4 +1115,481 @@ function rowToReview(row: Record<string, unknown>): Review {
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
+}
+
+// ------- Review Comments -------
+
+export interface DBReviewComment {
+  id: number;
+  repo: string;
+  prNumber: number;
+  reviewerId: ReviewerId;
+  path: string;
+  line: number;
+  body: string;
+  suggestion: string | null;
+  reviewDetails: {
+    severity?: ReviewComment["severity"];
+    confidence?: number | null;
+    evidence?: ReviewComment["evidence"] | null;
+  } | null;
+  status: string;
+  analysisCategory: string;
+  analysisReasoning: string | null;
+  analysisDetails: Omit<AnalysisResult, "commentId" | "category" | "reasoning"> | null;
+  publishedAt: string | null;
+  supersededAt: string | null;
+  fixCommitHash: string | null;
+  fixFilesChanged: string[] | null;
+  fixFixedAt: string | null;
+  createdAt: string;
+}
+
+/**
+ * Preserve prior review comments for traceability while superseding any
+ * previously unresolved comments from the same reviewer on a new review run.
+ */
+export function saveReviewComments(
+  repo: string,
+  prNumber: number,
+  reviewerId: ReviewerId,
+  comments: ReviewComment[],
+): number[] {
+  const db = getDB();
+  const now = new Date().toISOString();
+  const insertedIds: number[] = [];
+
+  const tx = db.transaction(() => {
+    db.prepare(
+      `UPDATE review_comments
+       SET status = 'superseded', superseded_at = ?
+       WHERE repo = ? AND pr_number = ? AND reviewer_id = ?
+       AND status IN ('new', 'analyzing', 'analyzed', 'fix_failed')`,
+    ).run(now, repo, prNumber, reviewerId);
+
+    const insert = db.prepare(`
+      INSERT INTO review_comments (
+        repo,
+        pr_number,
+        reviewer_id,
+        path,
+        line,
+        body,
+        suggestion,
+        review_details,
+        status,
+        analysis_category,
+        analysis_reasoning,
+        analysis_details,
+        superseded_at,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', 'UNTRIAGED', NULL, NULL, NULL, ?)
+    `);
+
+    for (const c of comments) {
+      const hasReviewEvidence =
+        Boolean(c.evidence?.riskSummary) ||
+        (c.evidence?.filesRead.length ?? 0) > 0 ||
+        (c.evidence?.changedLinesChecked.length ?? 0) > 0 ||
+        (c.evidence?.ruleReferences.length ?? 0) > 0;
+      const reviewDetails =
+        c.severity || c.confidence != null || hasReviewEvidence
+          ? JSON.stringify({
+              severity: c.severity ?? null,
+              confidence: c.confidence ?? null,
+              evidence: c.evidence ?? null,
+            })
+          : null;
+      const result = insert.run(
+        repo,
+        prNumber,
+        reviewerId,
+        c.path,
+        c.line,
+        c.body,
+        c.suggestion ?? null,
+        reviewDetails,
+        now,
+      );
+      insertedIds.push(Number(result.lastInsertRowid));
+    }
+  });
+  tx();
+  return insertedIds;
+}
+
+export function getReviewCommentsByReviewer(
+  repo: string,
+  prNumber: number,
+  reviewerId: ReviewerId,
+): DBReviewComment[] {
+  const rows = getDB()
+    .prepare(
+      `SELECT * FROM review_comments
+       WHERE repo = ? AND pr_number = ? AND reviewer_id = ?
+       ORDER BY CASE WHEN superseded_at IS NULL THEN 0 ELSE 1 END, created_at DESC, path, line`,
+    )
+    .all(repo, prNumber, reviewerId) as Array<Record<string, unknown>>;
+
+  return rows.map(rowToReviewComment);
+}
+
+export function getAllReviewComments(
+  repo: string,
+  prNumber: number,
+): DBReviewComment[] {
+  const rows = getDB()
+    .prepare(
+      `SELECT * FROM review_comments
+       WHERE repo = ? AND pr_number = ?
+       ORDER BY reviewer_id, CASE WHEN superseded_at IS NULL THEN 0 ELSE 1 END, created_at DESC, path, line`,
+    )
+    .all(repo, prNumber) as Array<Record<string, unknown>>;
+
+  return rows.map(rowToReviewComment);
+}
+
+export function getPendingReviewComments(
+  repo: string,
+  prNumber: number,
+  reviewerId?: ReviewerId,
+  commentIds?: number[],
+): DBReviewComment[] {
+  const params: Array<string | number> = [repo, prNumber];
+  const clauses = [
+    "repo = ?",
+    "pr_number = ?",
+    "superseded_at IS NULL",
+  ];
+
+  if (reviewerId) {
+    clauses.push("reviewer_id = ?");
+    params.push(reviewerId);
+  }
+
+  if (commentIds && commentIds.length > 0) {
+    clauses.push("status IN ('new', 'analyzing', 'analyzed', 'fix_failed')");
+    clauses.push(`id IN (${commentIds.map(() => "?").join(",")})`);
+    params.push(...commentIds);
+  } else {
+    clauses.push("status IN ('new', 'analyzing')");
+  }
+
+  const rows = getDB()
+    .prepare(`SELECT * FROM review_comments WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC, path, line`)
+    .all(...params) as Array<Record<string, unknown>>;
+
+  return rows.map(rowToReviewComment);
+}
+
+export function getPublishableReviewCommentsByReviewer(
+  repo: string,
+  prNumber: number,
+  reviewerId: ReviewerId,
+): DBReviewComment[] {
+  const rows = getDB()
+    .prepare(
+      `SELECT * FROM review_comments
+       WHERE repo = ? AND pr_number = ? AND reviewer_id = ?
+       AND status = 'analyzed'
+       AND superseded_at IS NULL
+       AND analysis_category NOT IN ('DISMISS', 'ALREADY_ADDRESSED')
+       ORDER BY path, line`,
+    )
+    .all(repo, prNumber, reviewerId) as Array<Record<string, unknown>>;
+
+  return rows.map(rowToReviewComment);
+}
+
+export function getCurrentReviewCommentsByReviewer(
+  repo: string,
+  prNumber: number,
+  reviewerId: ReviewerId,
+): DBReviewComment[] {
+  const rows = getDB()
+    .prepare(
+      `SELECT * FROM review_comments
+       WHERE repo = ? AND pr_number = ? AND reviewer_id = ?
+       AND superseded_at IS NULL
+       ORDER BY created_at DESC, path, line`,
+    )
+    .all(repo, prNumber, reviewerId) as Array<Record<string, unknown>>;
+
+  return rows.map(rowToReviewComment);
+}
+
+export function markReviewCommentsPublished(
+  repo: string,
+  prNumber: number,
+  reviewerId: ReviewerId,
+): void {
+  getDB()
+    .prepare(
+      `UPDATE review_comments
+       SET published_at = ?
+       WHERE repo = ? AND pr_number = ? AND reviewer_id = ?
+       AND published_at IS NULL
+       AND status = 'analyzed'
+       AND superseded_at IS NULL
+       AND analysis_category NOT IN ('DISMISS', 'ALREADY_ADDRESSED')`,
+    )
+    .run(new Date().toISOString(), repo, prNumber, reviewerId);
+}
+
+export function updateLocalCommentStatus(id: number, status: string): void {
+  getDB()
+    .prepare("UPDATE review_comments SET status = ? WHERE id = ?")
+    .run(status, id);
+}
+
+export function resetStaleLocalComments(repo: string, prNumber: number): number {
+  const result = getDB()
+    .prepare("UPDATE review_comments SET status = 'analyzed' WHERE repo = ? AND pr_number = ? AND status = 'fixing' AND superseded_at IS NULL")
+    .run(repo, prNumber);
+  return result.changes;
+}
+
+export function updateLocalCommentCategory(id: number, category: string): void {
+  getDB()
+    .prepare("UPDATE review_comments SET status = 'analyzed', analysis_category = ? WHERE id = ?")
+    .run(category, id);
+}
+
+export function updateLocalCommentAnalysis(id: number, analysis: AnalysisResult): void {
+  getDB()
+    .prepare(
+      `UPDATE review_comments
+       SET status = 'analyzed',
+           analysis_category = ?,
+           analysis_reasoning = ?,
+           analysis_details = ?
+       WHERE id = ?`,
+    )
+    .run(
+      analysis.category,
+      analysis.reasoning,
+      JSON.stringify({
+        verdict: analysis.verdict ?? null,
+        severity: analysis.severity ?? null,
+        confidence: analysis.confidence ?? null,
+        accessMode: analysis.accessMode ?? null,
+        evidence: analysis.evidence ?? null,
+      }),
+      id,
+    );
+}
+
+export function deleteLocalComment(id: number): number {
+  const result = getDB()
+    .prepare(
+      `DELETE FROM review_comments
+       WHERE id = ?
+       AND status != 'fixed'
+       AND COALESCE(analysis_category, 'UNTRIAGED') != 'ALREADY_ADDRESSED'
+       AND published_at IS NULL`,
+    )
+    .run(id);
+  return result.changes;
+}
+
+export function getFixableLocalComments(
+  repo: string,
+  prNumber: number,
+  commentIds?: number[],
+): DBReviewComment[] {
+  let rows: Array<Record<string, unknown>>;
+  if (commentIds && commentIds.length > 0) {
+    const placeholders = commentIds.map(() => "?").join(",");
+    rows = getDB()
+      .prepare(
+        `SELECT * FROM review_comments WHERE repo = ? AND pr_number = ?
+         AND status IN ('analyzed', 'fix_failed')
+         AND superseded_at IS NULL
+         AND id IN (${placeholders})`,
+      )
+      .all(repo, prNumber, ...commentIds) as Array<Record<string, unknown>>;
+  } else {
+    rows = getDB()
+      .prepare(
+        `SELECT * FROM review_comments WHERE repo = ? AND pr_number = ?
+         AND status IN ('analyzed', 'fix_failed')
+         AND superseded_at IS NULL
+         AND analysis_category IN ('MUST_FIX', 'SHOULD_FIX')`,
+      )
+      .all(repo, prNumber) as Array<Record<string, unknown>>;
+  }
+  return rows.map(rowToReviewComment);
+}
+
+export function updateLocalCommentFix(id: number, commitHash: string, filesChanged: string[]): void {
+  getDB()
+    .prepare(
+      `UPDATE review_comments SET status = 'fixed',
+        fix_commit_hash = ?, fix_files_changed = ?, fix_fixed_at = ?
+       WHERE id = ?`,
+    )
+    .run(commitHash, JSON.stringify(filesChanged), new Date().toISOString(), id);
+}
+
+function rowToReviewComment(row: Record<string, unknown>): DBReviewComment {
+  const rawReviewDetails = parseJsonColumn<{
+    severity?: ReviewComment["severity"];
+    confidence?: number | null;
+    evidence?: ReviewComment["evidence"] | null;
+  }>(row.review_details);
+  const reviewDetails =
+    rawReviewDetails && (
+      rawReviewDetails.severity ||
+      rawReviewDetails.confidence != null ||
+      rawReviewDetails.evidence?.riskSummary ||
+      (rawReviewDetails.evidence?.filesRead?.length ?? 0) > 0 ||
+      (rawReviewDetails.evidence?.changedLinesChecked?.length ?? 0) > 0 ||
+      (rawReviewDetails.evidence?.ruleReferences?.length ?? 0) > 0
+    )
+      ? rawReviewDetails
+      : null;
+  const analysisDetails = parseJsonColumn<Omit<AnalysisResult, "commentId" | "category" | "reasoning">>(
+    row.analysis_details,
+  );
+
+  return {
+    id: row.id as number,
+    repo: row.repo as string,
+    prNumber: row.pr_number as number,
+    reviewerId: row.reviewer_id as ReviewerId,
+    path: row.path as string,
+    line: row.line as number,
+    body: row.body as string,
+    suggestion: row.suggestion as string | null,
+    reviewDetails,
+    status: (row.status as string) ?? "new",
+    analysisCategory: (row.analysis_category as string) ?? "UNTRIAGED",
+    analysisReasoning: row.analysis_reasoning as string | null,
+    analysisDetails,
+    publishedAt: row.published_at as string | null,
+    supersededAt: row.superseded_at as string | null,
+    fixCommitHash: row.fix_commit_hash as string | null,
+    fixFilesChanged: row.fix_files_changed ? (JSON.parse(row.fix_files_changed as string) as string[]) : null,
+    fixFixedAt: row.fix_fixed_at as string | null,
+    createdAt: row.created_at as string,
+  };
+}
+
+// ------- PR Timeline -------
+
+export type TimelineEventType =
+  | "comments_fetched"
+  | "analysis_requested"
+  | "comments_analyzed"
+  | "fix_started"
+  | "fix_completed"
+  | "fix_no_changes"
+  | "fix_failed"
+  | "local_fix_started"
+  | "local_fix_completed"
+  | "local_fix_no_changes"
+  | "local_fix_failed"
+  | "review_requested"
+  | "review_completed"
+  | "review_failed"
+  | "score_refreshed"
+  | "comments_replied"
+  | "fix_reverted"
+  | "review_published";
+
+export interface TimelineEvent {
+  id: number;
+  repo: string;
+  prNumber: number;
+  eventType: TimelineEventType;
+  detail: Record<string, unknown>;
+  debugDetail: Record<string, unknown> | null;
+  hasDebug: boolean;
+  createdAt: string;
+}
+
+function parseTimelineJson(value: unknown): Record<string, unknown> {
+  if (typeof value !== "string" || value.trim().length === 0) return {};
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function rowToTimelineEvent(row: Record<string, unknown>, includeDebugDetail = false): TimelineEvent {
+  const debugDetail = row.debug_detail ? parseTimelineJson(row.debug_detail) : null;
+  return {
+    id: row.id as number,
+    repo: row.repo as string,
+    prNumber: row.pr_number as number,
+    eventType: row.event_type as TimelineEventType,
+    detail: parseTimelineJson(row.detail),
+    debugDetail: includeDebugDetail ? debugDetail : null,
+    hasDebug: Boolean(row.debug_detail),
+    createdAt: row.created_at as string,
+  };
+}
+
+export function recordTimelineEvent(
+  repo: string,
+  prNumber: number,
+  eventType: TimelineEventType,
+  detail: Record<string, unknown> = {},
+  debugDetail?: Record<string, unknown>,
+): number {
+  const result = getDB()
+    .prepare(
+      "INSERT INTO pr_timeline (repo, pr_number, event_type, detail, debug_detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .run(
+      repo,
+      prNumber,
+      eventType,
+      JSON.stringify(detail),
+      debugDetail ? JSON.stringify(debugDetail) : null,
+      new Date().toISOString(),
+    );
+
+  return Number(result.lastInsertRowid);
+}
+
+export function updateTimelineEventDebug(
+  eventId: number,
+  debugDetail: Record<string, unknown>,
+): void {
+  const row = getDB()
+    .prepare("SELECT debug_detail FROM pr_timeline WHERE id = ?")
+    .get(eventId) as { debug_detail?: string | null } | undefined;
+
+  if (!row) return;
+
+  const existing = row.debug_detail ? parseTimelineJson(row.debug_detail) : {};
+  const merged = { ...existing, ...debugDetail };
+
+  getDB()
+    .prepare("UPDATE pr_timeline SET debug_detail = ? WHERE id = ?")
+    .run(JSON.stringify(merged), eventId);
+}
+
+export function getTimeline(repo: string, prNumber: number, limit = 100): TimelineEvent[] {
+  const rows = getDB()
+    .prepare(
+      "SELECT id, repo, pr_number, event_type, detail, debug_detail, created_at FROM pr_timeline WHERE repo = ? AND pr_number = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+    )
+    .all(repo, prNumber, limit) as Array<Record<string, unknown>>;
+
+  return rows.map((row) => rowToTimelineEvent(row));
+}
+
+export function getTimelineEvent(repo: string, prNumber: number, eventId: number): TimelineEvent | null {
+  const row = getDB()
+    .prepare(
+      "SELECT id, repo, pr_number, event_type, detail, debug_detail, created_at FROM pr_timeline WHERE repo = ? AND pr_number = ? AND id = ?",
+    )
+    .get(repo, prNumber, eventId) as Record<string, unknown> | undefined;
+
+  if (!row) return null;
+  return rowToTimelineEvent(row, true);
 }

@@ -1,16 +1,28 @@
-import { spawn, exec } from "child_process";
+import { spawn, exec, execSync } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import type { BotComment, RepoConfig, AnalysisResult, AnalysisCategory } from "../types.js";
+import type {
+  BotComment,
+  RepoConfig,
+  AnalysisResult,
+  AnalysisCategory,
+  AnalysisAccessMode,
+  AnalysisEvidence,
+  AnalysisSeverity,
+  AnalysisVerdict,
+} from "../types.js";
 import { getPRBranch, getPRDiff } from "./github.js";
 
 const execAsync = promisify(exec);
 
-interface ClaudeJsonOutput {
-  result: string;
-}
+export type AnalyzerAgent = "claude" | "codex";
+
+const ANALYZER_AGENT_META: Record<AnalyzerAgent, { label: string; command: string }> = {
+  claude: { label: "Claude Code", command: "claude" },
+  codex: { label: "Codex", command: "codex" },
+};
 
 export interface AnalysisProgressEvent {
   type: "progress" | "complete" | "error";
@@ -22,7 +34,154 @@ export interface AnalysisProgressEvent {
   results?: AnalysisResult[];
 }
 
-function runClaude(prompt: string, cwd: string, onOutput?: (line: string) => void): Promise<string> {
+export interface AnalysisDebugInfo extends Record<string, unknown> {
+  analyzerAgent: AnalyzerAgent;
+  analyzerName: string;
+  repo: string;
+  prNumber: number;
+  prTitle: string;
+  branch: string | null;
+  hasWorktree: boolean;
+  accessMode: AnalysisAccessMode;
+  commentIds: number[];
+  commentCount: number;
+  filePaths: string[];
+  diffLength: number;
+  diffTruncated: boolean;
+  prompt: string;
+}
+
+export function isAnalyzerAgentAvailable(agent: AnalyzerAgent): boolean {
+  try {
+    execSync(`which ${ANALYZER_AGENT_META[agent].command}`, { encoding: "utf-8", timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function getAnalyzerAgentLabel(agent: AnalyzerAgent): string {
+  return ANALYZER_AGENT_META[agent].label;
+}
+
+const ANALYSIS_CATEGORIES: AnalysisCategory[] = [
+  "MUST_FIX",
+  "SHOULD_FIX",
+  "NICE_TO_HAVE",
+  "DISMISS",
+  "ALREADY_ADDRESSED",
+];
+
+const ANALYSIS_SEVERITIES: AnalysisSeverity[] = [
+  "MUST_FIX",
+  "SHOULD_FIX",
+  "NICE_TO_HAVE",
+];
+
+const ANALYSIS_VERDICTS: AnalysisVerdict[] = [
+  "ACTIONABLE",
+  "DISMISS",
+  "ALREADY_ADDRESSED",
+];
+
+function isAnalysisCategory(value: string): value is AnalysisCategory {
+  return ANALYSIS_CATEGORIES.includes(value as AnalysisCategory);
+}
+
+function normalizeAnalysisVerdict(value: unknown): AnalysisVerdict | undefined {
+  if (typeof value !== "string") return undefined;
+  const upper = value.trim().toUpperCase();
+  return ANALYSIS_VERDICTS.includes(upper as AnalysisVerdict)
+    ? upper as AnalysisVerdict
+    : undefined;
+}
+
+function normalizeAnalysisSeverity(value: unknown): AnalysisSeverity | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const upper = value.trim().toUpperCase();
+  return ANALYSIS_SEVERITIES.includes(upper as AnalysisSeverity)
+    ? upper as AnalysisSeverity
+    : undefined;
+}
+
+function normalizeAnalysisConfidence(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.max(1, Math.min(5, Math.round(numeric)));
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function normalizeAnalysisEvidence(value: unknown): AnalysisEvidence | null {
+  if (!value || typeof value !== "object") return null;
+  const evidence = value as Record<string, unknown>;
+  const normalized: AnalysisEvidence = {
+    filesRead: normalizeStringArray(evidence.filesRead),
+    symbolsChecked: normalizeStringArray(evidence.symbolsChecked),
+    callersChecked: normalizeStringArray(evidence.callersChecked),
+    testsChecked: normalizeStringArray(evidence.testsChecked),
+  };
+
+  if (typeof evidence.riskSummary === "string" && evidence.riskSummary.trim()) {
+    normalized.riskSummary = evidence.riskSummary.trim();
+  }
+  if (typeof evidence.validationNotes === "string" && evidence.validationNotes.trim()) {
+    normalized.validationNotes = evidence.validationNotes.trim();
+  }
+
+  return (
+    normalized.riskSummary ||
+    normalized.validationNotes ||
+    normalized.filesRead.length > 0 ||
+    normalized.symbolsChecked.length > 0 ||
+    normalized.callersChecked.length > 0 ||
+    normalized.testsChecked.length > 0
+  )
+    ? normalized
+    : null;
+}
+
+function normalizeAnalysisAccessMode(
+  value: unknown,
+  fallback: AnalysisAccessMode,
+): AnalysisAccessMode {
+  if (typeof value !== "string") return fallback;
+  const upper = value.trim().toUpperCase();
+  return upper === "FULL_CODEBASE" || upper === "DIFF_ONLY"
+    ? upper as AnalysisAccessMode
+    : fallback;
+}
+
+function deriveCategoryFromStructuredAnalysis(raw: {
+  category?: unknown;
+  verdict?: unknown;
+  severity?: unknown;
+}): AnalysisCategory | null {
+  if (typeof raw.category === "string" && isAnalysisCategory(raw.category.trim().toUpperCase())) {
+    return raw.category.trim().toUpperCase() as AnalysisCategory;
+  }
+
+  const verdict = normalizeAnalysisVerdict(raw.verdict);
+  const severity = normalizeAnalysisSeverity(raw.severity);
+
+  if (verdict === "DISMISS") return "DISMISS";
+  if (verdict === "ALREADY_ADDRESSED") return "ALREADY_ADDRESSED";
+  if (verdict === "ACTIONABLE" && severity) return severity;
+  if (!verdict && severity) return severity;
+
+  return null;
+}
+
+function runClaudeAnalysis(prompt: string, cwd: string, onOutput?: (line: string) => void): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       "claude",
@@ -89,7 +248,7 @@ function runClaude(prompt: string, cwd: string, onOutput?: (line: string) => voi
 
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error("Claude timed out after 20 minutes"));
+      reject(new Error("Claude Code timed out after 20 minutes"));
     }, 1200000);
 
     child.on("close", (code) => {
@@ -108,11 +267,11 @@ function runClaude(prompt: string, cwd: string, onOutput?: (line: string) => voi
       }
 
       if (code !== 0) {
-        reject(new Error(`Claude exited with code ${code}: ${stderr}`));
+        reject(new Error(`Claude Code exited with code ${code}: ${stderr}`));
       } else if (lastResult) {
         resolve(lastResult);
       } else {
-        reject(new Error(`No result from Claude stream. stderr: ${stderr.slice(0, 500)}`));
+        reject(new Error(`No result from Claude Code stream. stderr: ${stderr.slice(0, 500)}`));
       }
     });
 
@@ -126,14 +285,78 @@ function runClaude(prompt: string, cwd: string, onOutput?: (line: string) => voi
   });
 }
 
+function runCodexAnalysis(prompt: string, cwd: string, onOutput?: (line: string) => void): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "codex",
+      ["exec", "--full-auto", prompt],
+      { cwd, stdio: ["ignore", "pipe", "pipe"] },
+    );
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      for (const line of text.split("\n")) {
+        if (line.trim()) onOutput?.(line.trim());
+      }
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderr += text;
+      for (const line of text.split("\n")) {
+        if (line.trim()) onOutput?.(line.trim());
+      }
+    });
+
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("Codex timed out after 20 minutes"));
+    }, 1200000);
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timeout);
+
+      if (signal) {
+        reject(new Error(`Codex was killed by signal ${signal}`));
+        return;
+      }
+
+      if (code !== 0) {
+        const cleanStderr = stderr.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "").trim();
+        const message = cleanStderr || "Unknown error";
+        reject(new Error(`Codex exited with code ${code}: ${message}`));
+        return;
+      }
+
+      resolve(stdout.trim());
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
+
 export async function analyzeComments(
   comments: BotComment[],
   repo: RepoConfig,
+  analyzerAgent: AnalyzerAgent = "claude",
   onProgress?: (event: AnalysisProgressEvent) => void,
+  onDebug?: (debug: AnalysisDebugInfo) => void,
 ): Promise<AnalysisResult[]> {
   if (comments.length === 0) return [];
+  if (!isAnalyzerAgentAvailable(analyzerAgent)) {
+    throw new Error(`${getAnalyzerAgentLabel(analyzerAgent)} is not available on this machine`);
+  }
 
   const emit = (e: AnalysisProgressEvent) => onProgress?.(e);
+  const analyzerLabel = getAnalyzerAgentLabel(analyzerAgent);
+  const analyzerOutputStep = `${analyzerAgent}_output`;
 
   // Group by PR for context
   const byPR = new Map<string, BotComment[]>();
@@ -167,7 +390,7 @@ export async function analyzeComments(
     });
     const prDiff = await getPRDiff(repoLabel, prNumber, repo.localPath, branch ?? undefined);
 
-    // Step 3: Set up a read-only local worktree so Claude can explore the full codebase.
+    // Step 3: Set up a read-only local worktree so the analyzer can explore the full codebase.
     // Unlike the fixer's getWorkDir, we do NOT symlink node_modules or strip hooks —
     // analysis is read-only and those mutations can corrupt the git state / PR.
     let workDir: string | undefined;
@@ -181,7 +404,7 @@ export async function analyzeComments(
       });
       try {
         await execAsync("git fetch origin", { cwd: repo.localPath, timeout: 60000 });
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-analyze-"));
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `pr-analyze-${analyzerAgent}-`));
         await execAsync(`git worktree add ${tmpDir} origin/${branch}`, {
           cwd: repo.localPath,
           timeout: 60000,
@@ -202,12 +425,16 @@ export async function analyzeComments(
       }
     }
 
+    const accessMode: AnalysisAccessMode = workDir ? "FULL_CODEBASE" : "DIFF_ONLY";
+
     // Step 4: Read file contents from the local worktree for inline context
     const filePaths = [...new Set(prComments.filter((c) => c.path).map((c) => c.path!))];
     emit({
       type: "progress",
       step: "reading_files",
-      message: `Reading ${filePaths.length} file(s) from ${workDir ? "local worktree" : "PR branch"}...`,
+      message: workDir
+        ? `Reading ${filePaths.length} file(s) from the local worktree...`
+        : `Using diff/snippet context for ${filePaths.length} referenced file(s)...`,
       progress: 25,
       detail: filePaths.join(", "),
     });
@@ -266,100 +493,140 @@ export async function analyzeComments(
 
     // Include PR diff for cross-file context (truncate if too large)
     let diffSection = "";
+    let diffTruncated = false;
     if (prDiff) {
       const maxDiffLen = 12000;
-      const truncatedDiff =
-        prDiff.length > maxDiffLen
-          ? prDiff.slice(0, maxDiffLen) + "\n... (diff truncated for length)"
-          : prDiff;
+      diffTruncated = prDiff.length > maxDiffLen;
+      const truncatedDiff = diffTruncated
+        ? prDiff.slice(0, maxDiffLen) + "\n... (diff truncated for length)"
+        : prDiff;
       diffSection = `\n## Full PR Diff (use this for cross-file context)\n\`\`\`diff\n${truncatedDiff}\n\`\`\`\n`;
     }
 
     const prompt = `You are a senior staff engineer triaging automated code review comments on a pull request.
-Your job is to separate signal from noise: identify genuine issues while filtering out false positives that waste developer time.
-Critically, you must trace the **ripple effects** of each suggested change — bugs often hide in the interactions between components, not in the code a bot points at.
+Your job is to separate signal from noise, identify real engineering risk, and filter out review noise that wastes developer time.
+The most important part of this task is tracing ripple effects: a comment is only actionable if it still applies in the current code and survives side-effect analysis.
 
 ## PR: ${prComments[0].prTitle} (#${prNumber})
 Repository: ${repoLabel}
-${workDir ? `\n**You are running inside a local checkout of this repository at the PR branch. Use your Read, Grep, Glob, and other file tools to explore the full codebase. Do NOT claim files don't exist locally — they are all available to you.**\n` : ""}
+
+## Access Mode
+${accessMode}
+${workDir
+    ? "You are running inside a local checkout of the PR branch. Use your file and search tools to inspect the full codebase. Read full files, callers, and tests when needed."
+    : "You do NOT have safe access to the target repository beyond the diff and snippets in this prompt. Do NOT claim you searched the repo or read files that are not included here. If evidence is incomplete, lower confidence and say so explicitly."}
 ${diffSection}
 ## Bot Comments to Analyze
 
 ${commentDescriptions.join("\n---\n")}
 
-## Your Task
+## Decision Model
 
-You have full access to the codebase. **You MUST read files beyond the snippets above** before making any judgment. For EACH comment, perform the following deep investigation:
+For EACH comment, decide two things separately:
+1. **Verdict**: is the comment actionable, a false positive, or already addressed?
+2. **Severity**: if actionable, how important is it to fix?
 
-### Step 0: Explore the codebase thoroughly
-Before evaluating any comment, build a mental model of the area being changed:
-- Read the **full files** referenced in comments, not just the snippets
-- Check **imports, type definitions, interfaces, and base classes** to understand contracts
-- Search for **all callers and consumers** of any function/method/type being discussed (use grep/search)
-- Read **test files** related to the changed code to understand expected behavior and edge cases
-- Check **configuration files, constants, and shared state** that the code depends on
+This separation is mandatory. Do not overload severity to mean "the bot is wrong."
+
+### Step 0: Build the right context
+${workDir
+    ? `- Read the full files referenced in the comment
+- Check imports, types, interfaces, and adjacent code
+- Search for callers, consumers, and affected tests
+- Inspect relevant config, constants, and shared state`
+    : `- Use only the diff, inline snippets, and comment text provided here
+- Infer cautiously from the visible code
+- Do not invent unseen callers, tests, or files`}
 
 ### Step 1: Is the issue still present?
-Read the current code at the location. If the code has already been updated to address the concern, mark as ALREADY_ADDRESSED.
+If the current code already addresses the concern, return verdict = ALREADY_ADDRESSED.
 
-### Step 2: Is this a real issue or a false positive?
-Bot reviewers frequently produce false positives. Consider:
-- Does the bot's suggestion actually apply to this specific code in context?
-- Is the bot misunderstanding the code's intent, the API being used, or the broader system design?
-- Does the suggestion make sense when considering the full PR diff and how different changed files interact?
-- Would the suggested change actually improve the code, or is it unnecessary, wrong, or would it introduce new problems?
-- Is the bot flagging something that is actually correct by design or convention in this codebase?
+### Step 2: Is the bot comment valid?
+Review bots are noisy. Ask:
+- Does the suggestion apply to this exact code path?
+- Is the bot misunderstanding intent, API behavior, or architecture?
+- Would the suggested change improve the code, or would it be unnecessary or harmful?
+- If the bot's proposed fix is wrong, is there still a real underlying issue that should be fixed another way?
 
-### Step 3: Deep side-effect and ripple analysis (CRITICAL)
-This is the most important step. For each comment where the bot suggests a code change, you MUST trace what would happen if the suggestion were applied:
+### Step 3: Trace ripple effects before calling it actionable
+For comments that might be valid, inspect or infer the blast radius:
+- Callers and consumers
+- Type contracts and interfaces
+- Shared state and data flow
+- Behavioral side effects such as ordering, async behavior, and error propagation
+- Boundary effects across API, database, serialization, or external integrations
 
-**Callers & consumers**: Search the codebase for every place that calls or references the function/method/variable/type being discussed. Would the suggested change break any of them? Would it change behavior they depend on (return type, error handling, null vs undefined, ordering, etc.)?
+### Step 4: Assign severity only if the issue is actionable
+- **MUST_FIX**: concrete bug, security issue, or correctness failure with a specific path to breakage
+- **SHOULD_FIX**: worthwhile improvement with real benefit and low regression risk
+- **NICE_TO_HAVE**: low-impact improvement or maintainability cleanup
 
-**Type contracts & interfaces**: If the suggestion changes a function signature, return type, object shape, or class interface — find every implementation and every consumer. Would any of them need updating? Would TypeScript catch it, or would it be a silent runtime change?
-
-**Shared state & data flow**: Trace how data flows into and out of the code in question. If the suggestion changes how data is produced, stored, or validated — what downstream consumers would be affected? Check database schemas, API response shapes, cached values, and global/module-level state.
-
-**Behavioral side effects**: Would the suggestion change timing, ordering, error propagation, or async behavior? For example: changing a synchronous call to async, swallowing an error that callers expect to be thrown, changing the order of operations that has implicit dependencies, altering retry/timeout behavior.
-
-**Cross-boundary impacts**: Does this code sit at a boundary (API endpoint, database layer, message handler, serialization boundary)? Changes at boundaries often have invisible consumers (other services, frontend code, stored data, external integrations).
-
-### Step 4: Severity assessment
-Be conservative with severity. Most valid bot suggestions are improvements, not bugs.
-**Elevate severity** when your side-effect analysis reveals hidden impacts the bot didn't mention — a "minor style fix" that would silently break callers is a MUST_FIX, not a NICE_TO_HAVE. Conversely, **lower severity** if the bot claims high urgency but your analysis shows the blast radius is zero.
-
-## Categories
-
-- **MUST_FIX** — Genuine bug, security vulnerability, or correctness problem with **concrete evidence** it will cause failures. You must be able to describe the specific failure scenario. Theoretical concerns without a concrete path to failure do NOT qualify. Also applies when applying the bot's own suggestion would introduce breakage due to unconsidered side effects.
-- **SHOULD_FIX** — Valid improvement with real benefit: performance problem with measurable impact, best practice violation with real consequences, or meaningful maintainability gain. The suggestion must be correct and beneficial, and your side-effect analysis confirms it is safe to apply.
-- **NICE_TO_HAVE** — Minor style preference, trivial improvement, or low-impact suggestion. Not wrong, but not important enough to block a PR. Side-effect analysis shows negligible risk.
-- **DISMISS** — False positive, irrelevant suggestion, bot misunderstanding the code, or suggestion that would make the code worse. You MUST explain specifically why the bot is wrong. Also use this when your side-effect analysis shows the suggestion would introduce regressions or break existing behavior.
-- **ALREADY_ADDRESSED** — The issue has been fixed in the current code.
+### Verdict rules
+- **ACTIONABLE**: the underlying issue is real and worth fixing. If the bot's suggested patch is wrong but the underlying concern is real, still use ACTIONABLE and explain the safer fix direction.
+- **DISMISS**: false positive, irrelevant concern, misunderstanding of the code, or a suggestion that would make the code worse.
+- **ALREADY_ADDRESSED**: the latest code already resolves it.
 
 ## Response Format
 
-After you have explored the codebase and formed your judgments, respond with a JSON array. Each element:
-- "commentId": number
-- "category": one of "MUST_FIX", "SHOULD_FIX", "NICE_TO_HAVE", "DISMISS", "ALREADY_ADDRESSED"
-- "reasoning": string (3-5 sentences. Start with your verdict, then cite what you found in the codebase. For MUST_FIX: describe the specific failure scenario. For DISMISS: explain why the bot is wrong. ALWAYS include what your side-effect analysis found — which callers/consumers/types you checked and whether applying the change is safe or dangerous. Name the specific files and functions you investigated.)
+Respond with a JSON array. Each element must be:
+{
+  "commentId": <number>,
+  "verdict": "ACTIONABLE" | "DISMISS" | "ALREADY_ADDRESSED",
+  "severity": "MUST_FIX" | "SHOULD_FIX" | "NICE_TO_HAVE" | null,
+  "confidence": <number 1-5>,
+  "reasoning": "<3-5 sentences. Start with the verdict, then explain the evidence. If ACTIONABLE and MUST_FIX, describe the concrete failure scenario. If DISMISS, explain exactly why the bot is wrong. Mention limitations if you are in DIFF_ONLY mode.>",
+  "accessMode": "${accessMode}",
+  "evidence": {
+    "filesRead": ["<files actually inspected or visible in prompt>"],
+    "symbolsChecked": ["<functions/types/contracts inspected>"],
+    "callersChecked": ["<callers/consumers checked or inferred>"],
+    "testsChecked": ["<tests inspected, if any>"],
+    "riskSummary": "<one sentence on why applying or ignoring the comment is safe or risky>",
+    "validationNotes": "<optional limitation or uncertainty note>"
+  }
+}
 
-Example: [{"commentId": 123, "category": "DISMISS", "reasoning": "The bot flags a potential null dereference on line 45, but fetchUser() is guaranteed to return a non-null value here because of the guard clause on line 38 that returns early if the user doesn't exist. Checked all 3 callers of this function (UserService.ts:89, AuthController.ts:142, AdminRoute.ts:67) — none pass values that could bypass the guard. The bot is not considering the control flow."}]`;
+Compatibility note for downstream systems:
+- If verdict = ACTIONABLE, category is derived from severity
+- If verdict = DISMISS, category is DISMISS
+- If verdict = ALREADY_ADDRESSED, category is ALREADY_ADDRESSED
 
-    // Step 6: Send to Claude
-    const claudeCwd = workDir ?? process.cwd();
+Never return ACTIONABLE with severity = null. Never claim repo-wide evidence in DIFF_ONLY mode.`;
+
+    onDebug?.({
+      analyzerAgent,
+      analyzerName: analyzerLabel,
+      repo: repoLabel,
+      prNumber,
+      prTitle: prComments[0].prTitle,
+      branch,
+      hasWorktree: Boolean(workDir),
+      accessMode,
+      commentIds: prComments.map((c) => c.id),
+      commentCount: prComments.length,
+      filePaths,
+      diffLength: prDiff?.length ?? 0,
+      diffTruncated,
+      prompt,
+    });
+
+    // Step 6: Send to the selected analyzer
+    const analyzerCwd = workDir ?? process.cwd();
     emit({
       type: "progress",
-      step: "calling_claude",
-      message: `Sending ${prComments.length} comment(s) to Claude for deep analysis${workDir ? " (with local codebase access)" : ""}...`,
+      step: `calling_${analyzerAgent}`,
+      message: `Sending ${prComments.length} comment(s) to ${analyzerLabel} for deep analysis${workDir ? " (with local codebase access)" : ""}...`,
       progress: 45,
-      detail: "Claude is reviewing each comment against the full PR context. This may take 1-2 minutes.",
+      detail: `${analyzerLabel} is reviewing each comment against the full PR context. This may take 1-2 minutes.`,
     });
 
     let result: string;
     try {
-      result = await runClaude(prompt, claudeCwd, (line) => {
+      const runAnalysis = analyzerAgent === "codex" ? runCodexAnalysis : runClaudeAnalysis;
+      result = await runAnalysis(prompt, analyzerCwd, (line) => {
         emit({
           type: "progress",
-          step: "claude_output",
+          step: analyzerOutputStep,
           message: line,
           progress: 50,
         });
@@ -379,11 +646,11 @@ Example: [{"commentId": 123, "category": "DISMISS", "reasoning": "The bot flags 
     emit({
       type: "progress",
       step: "parsing_response",
-      message: "Claude responded — parsing results...",
+      message: `${analyzerLabel} responded — parsing results...`,
       progress: 85,
     });
 
-    // Extract JSON array from the response — Claude may wrap it in text/code blocks
+    // Extract JSON array from the response — the analyzer may wrap it in text/code blocks
     let cleaned = result.trim();
 
     // Try to extract from code block first
@@ -402,24 +669,39 @@ Example: [{"commentId": 123, "category": "DISMISS", "reasoning": "The bot flags 
     }
 
     try {
-      const analyses = JSON.parse(cleaned) as Array<{
-        commentId: number;
-        category: AnalysisCategory;
-        reasoning: string;
-      }>;
+      const analyses = JSON.parse(cleaned) as Array<Record<string, unknown>>;
+
+      const parsedResults: AnalysisResult[] = [];
 
       for (const a of analyses) {
-        allResults.push({
-          commentId: a.commentId,
-          category: a.category,
-          reasoning: a.reasoning,
+        const commentId = Number(a.commentId);
+        if (!Number.isFinite(commentId)) continue;
+
+        const category = deriveCategoryFromStructuredAnalysis(a) ?? "SHOULD_FIX";
+        const verdict = normalizeAnalysisVerdict(a.verdict);
+        const severity = normalizeAnalysisSeverity(a.severity) ?? (category === "MUST_FIX" || category === "SHOULD_FIX" || category === "NICE_TO_HAVE" ? category : null);
+        const reasoning = typeof a.reasoning === "string" && a.reasoning.trim()
+          ? a.reasoning.trim()
+          : "Analysis completed, but no reasoning was provided.";
+
+        parsedResults.push({
+          commentId,
+          category,
+          reasoning,
+          verdict: verdict ?? (category === "DISMISS" ? "DISMISS" : category === "ALREADY_ADDRESSED" ? "ALREADY_ADDRESSED" : "ACTIONABLE"),
+          severity,
+          confidence: normalizeAnalysisConfidence(a.confidence),
+          accessMode: normalizeAnalysisAccessMode(a.accessMode, accessMode),
+          evidence: normalizeAnalysisEvidence(a.evidence),
         });
       }
 
+      allResults.push(...parsedResults);
+
       // Emit summary
       const counts: Record<string, number> = {};
-      for (const a of analyses) {
-        counts[a.category] = (counts[a.category] ?? 0) + 1;
+      for (const result of parsedResults) {
+        counts[result.category] = (counts[result.category] ?? 0) + 1;
       }
       const summary = Object.entries(counts)
         .map(([cat, n]) => `${n} ${cat.replace(/_/g, " ")}`)
@@ -433,11 +715,11 @@ Example: [{"commentId": 123, "category": "DISMISS", "reasoning": "The bot flags 
         detail: summary,
       });
     } catch (parseErr) {
-      console.error("Failed to parse Claude response:", cleaned);
+      console.error(`Failed to parse ${analyzerLabel} response:`, cleaned);
       emit({
         type: "error",
         step: "parse_error",
-        message: "Failed to parse Claude's response — marking all for manual review.",
+        message: `Failed to parse ${analyzerLabel}'s response — marking all for manual review.`,
         progress: 100,
       });
       for (const c of prComments) {
@@ -445,6 +727,9 @@ Example: [{"commentId": 123, "category": "DISMISS", "reasoning": "The bot flags 
           commentId: c.id,
           category: "SHOULD_FIX",
           reasoning: "Analysis failed — please review manually.",
+          verdict: "ACTIONABLE",
+          severity: "SHOULD_FIX",
+          accessMode,
         });
       }
     }

@@ -30,6 +30,29 @@ export interface PRInfo {
   updatedAt: string;
 }
 
+export interface PRFileChange {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface PROverview {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  headRefName: string;
+  baseRefName: string;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  commitCount: number;
+  files: PRFileChange[];
+}
+
 export interface EnrichedComment {
   id: number;
   prNumber: number;
@@ -49,6 +72,18 @@ export interface EnrichedComment {
     commentId: number;
     category: string;
     reasoning: string;
+    verdict?: "ACTIONABLE" | "DISMISS" | "ALREADY_ADDRESSED";
+    severity?: "MUST_FIX" | "SHOULD_FIX" | "NICE_TO_HAVE" | null;
+    confidence?: number | null;
+    accessMode?: "FULL_CODEBASE" | "DIFF_ONLY";
+    evidence?: {
+      filesRead: string[];
+      symbolsChecked: string[];
+      callersChecked: string[];
+      testsChecked: string[];
+      riskSummary?: string;
+      validationNotes?: string;
+    } | null;
   } | null;
   fixResult: {
     commentId: number;
@@ -68,7 +103,12 @@ export interface FixLogEntry {
   ts: string;
 }
 
+export type AnalyzerAgent = "claude" | "codex";
+export type FixerAgent = AnalyzerAgent;
+export type ReviewerId = "greptile" | "claude" | "codex";
+
 export interface FixProgress {
+  agent: FixerAgent;
   steps: FixLogEntry[];
   output: string[];
   startedAt: string;
@@ -76,7 +116,7 @@ export interface FixProgress {
 }
 
 export interface PRStatus {
-  phase: string;
+  phase: "polled" | "analyzed" | "fixing" | "fixed" | "merge_ready" | "re_review_requested" | "waiting_for_review";
   reviewCycle: number;
   reviewScores: Record<string, number | null>;
   lastFixedAt: string | null;
@@ -95,6 +135,11 @@ export interface PRStatus {
 
 export interface AppSettings {
   autoReReview: boolean;
+  coordinatorEnabled: boolean;
+  coordinatorAgent: "claude" | "codex";
+  defaultAnalyzerAgent: AnalyzerAgent;
+  defaultFixerAgent: FixerAgent;
+  defaultReviewerIds: ReviewerId[];
 }
 
 export interface DashboardSummary {
@@ -182,6 +227,18 @@ export function usePRComments(repo: string, prNumber: number) {
   });
 }
 
+export function usePROverview(repo: string, prNumber: number) {
+  return useQuery({
+    queryKey: ["prOverview", repo, prNumber],
+    queryFn: () =>
+      fetchJson<PROverview>(
+        `/api/prs/${encodeURIComponent(repo)}/${prNumber}/overview`,
+      ),
+    enabled: !!repo && !!prNumber,
+    refetchInterval: 30000,
+  });
+}
+
 // Refresh a specific PR's comments from GitHub.
 // Also invalidates reviews since the refresh extracts Greptile scores from comments.
 export function useRefreshPR() {
@@ -195,6 +252,9 @@ export function useRefreshPR() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({
         queryKey: ["comments", variables.repo, variables.prNumber],
+      });
+      qc.invalidateQueries({
+        queryKey: ["prOverview", variables.repo, variables.prNumber],
       });
       qc.invalidateQueries({
         queryKey: ["reviews", variables.repo, variables.prNumber],
@@ -234,7 +294,7 @@ export function useAnalyze() {
   const [activeKey, setActiveKey] = useState<string | null>(null);
 
   const mutate = useCallback(
-    async (data: { repo: string; prNumber: number; commentIds?: number[] }) => {
+    async (data: { repo: string; prNumber: number; commentIds?: number[]; analyzerAgent?: AnalyzerAgent }) => {
       const key = `${data.repo}:${data.prNumber}`;
       setIsPending(true);
       setActiveKey(key);
@@ -246,7 +306,7 @@ export function useAnalyze() {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ commentIds: data.commentIds }),
+            body: JSON.stringify({ commentIds: data.commentIds, analyzerAgent: data.analyzerAgent }),
           },
         );
 
@@ -262,6 +322,7 @@ export function useAnalyze() {
           setProgressState(null);
           setActiveKey(null);
           qc.invalidateQueries({ queryKey: ["comments", data.repo, data.prNumber] });
+          qc.invalidateQueries({ queryKey: ["timeline", data.repo, data.prNumber] });
           qc.invalidateQueries({ queryKey: ["summary"] });
           return;
         }
@@ -297,8 +358,8 @@ export function useAnalyze() {
                   output: prev?.output ?? [],
                   progress: 100,
                 }));
-              } else if (event.step === "claude_output") {
-                // Live output from Claude CLI
+              } else if (event.step === "claude_output" || event.step === "codex_output") {
+                // Live output from the active analyzer CLI
                 setProgressState((prev) => ({
                   steps: prev?.steps ?? [],
                   output: [...(prev?.output ?? []), event.message],
@@ -334,6 +395,7 @@ export function useAnalyze() {
 
         // Invalidate queries to refresh data
         qc.invalidateQueries({ queryKey: ["comments", data.repo, data.prNumber] });
+        qc.invalidateQueries({ queryKey: ["timeline", data.repo, data.prNumber] });
         qc.invalidateQueries({ queryKey: ["summary"] });
       } catch (err) {
         setProgressState((prev) => ({
@@ -440,10 +502,11 @@ export function useFixComments() {
       repo: string;
       prNumber: number;
       commentIds?: number[];
+      fixerAgent: FixerAgent;
     }) =>
       fetchJson(`/api/prs/${encodeURIComponent(data.repo)}/${data.prNumber}/fix`, {
         method: "POST",
-        body: JSON.stringify({ commentIds: data.commentIds }),
+        body: JSON.stringify({ commentIds: data.commentIds, fixerAgent: data.fixerAgent }),
       }),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({
@@ -451,6 +514,9 @@ export function useFixComments() {
       });
       qc.invalidateQueries({
         queryKey: ["prStatus", variables.repo, variables.prNumber],
+      });
+      qc.invalidateQueries({
+        queryKey: ["timeline", variables.repo, variables.prNumber],
       });
       qc.invalidateQueries({ queryKey: ["summary"] });
     },
@@ -494,6 +560,7 @@ export function useReplyToComments() {
       ),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: ["comments", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["timeline", variables.repo, variables.prNumber] });
     },
   });
 }
@@ -512,6 +579,140 @@ export function usePRStatus(repo: string, prNumber: number) {
       if (data?.phase === "fixing") return 3000; // Poll fast while fixing
       return 10000;
     },
+  });
+}
+
+// Timeline
+export interface TimelineEvent {
+  id: number;
+  repo: string;
+  prNumber: number;
+  eventType: string;
+  detail: Record<string, unknown>;
+  debugDetail: Record<string, unknown> | null;
+  hasDebug: boolean;
+  createdAt: string;
+}
+
+export interface SuggestedNextStep {
+  action:
+    | "ignored"
+    | "busy"
+    | "merge_ready"
+    | "analyze_github"
+    | "analyze_local"
+    | "fix_github"
+    | "fix_local"
+    | "publish_review"
+    | "reply_comments"
+    | "request_review"
+    | "idle";
+  title: string;
+  description: string;
+  tone: "warning" | "info" | "success" | "neutral";
+  canExecute: boolean;
+  reviewerId?: string;
+  reviewerIds?: string[];
+  agent?: AnalyzerAgent;
+  blockingJobId?: string;
+}
+
+export interface CoordinatorPRPreference {
+  ignored: boolean;
+  updatedAt: string | null;
+}
+
+export function useTimeline(repo: string, prNumber: number) {
+  return useQuery({
+    queryKey: ["timeline", repo, prNumber],
+    queryFn: () =>
+      fetchJson<TimelineEvent[]>(
+        `/api/prs/${encodeURIComponent(repo)}/${prNumber}/timeline`,
+      ),
+    enabled: !!repo && !!prNumber,
+    refetchInterval: 10000,
+  });
+}
+
+export function useCoordinatorPRPreference(repo: string, prNumber: number) {
+  return useQuery({
+    queryKey: ["coordinatorPreference", repo, prNumber],
+    queryFn: () =>
+      fetchJson<CoordinatorPRPreference>(
+        `/api/prs/${encodeURIComponent(repo)}/${prNumber}/coordinator-preference`,
+      ),
+    enabled: !!repo && !!prNumber,
+  });
+}
+
+export function useUpdateCoordinatorPRPreference() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { repo: string; prNumber: number; ignored: boolean }) =>
+      fetchJson<CoordinatorPRPreference>(
+        `/api/prs/${encodeURIComponent(data.repo)}/${data.prNumber}/coordinator-preference`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ ignored: data.ignored }),
+        },
+      ),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["coordinatorPreference", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["suggestedNextStep", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+}
+
+export function useSuggestedNextStep(repo: string, prNumber: number) {
+  return useQuery({
+    queryKey: ["suggestedNextStep", repo, prNumber],
+    queryFn: () =>
+      fetchJson<SuggestedNextStep>(
+        `/api/prs/${encodeURIComponent(repo)}/${prNumber}/next-step`,
+      ),
+    enabled: !!repo && !!prNumber,
+    refetchInterval: 10000,
+  });
+}
+
+export function useExecuteSuggestedNextStep() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { repo: string; prNumber: number }) =>
+      fetchJson<{ executed: boolean; step: SuggestedNextStep }>(
+        `/api/prs/${encodeURIComponent(data.repo)}/${data.prNumber}/next-step/execute`,
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        },
+      ),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["suggestedNextStep", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["timeline", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["comments", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["reviews", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["reviewComments", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["prStatus", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+}
+
+export function useTimelineEvent(
+  repo: string,
+  prNumber: number,
+  eventId: number | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["timelineEvent", repo, prNumber, eventId],
+    queryFn: () =>
+      fetchJson<TimelineEvent>(
+        `/api/prs/${encodeURIComponent(repo)}/${prNumber}/timeline/${eventId}`,
+      ),
+    enabled: enabled && !!repo && !!prNumber && eventId !== null,
+    refetchInterval: enabled ? 3000 : false,
   });
 }
 
@@ -577,7 +778,10 @@ export function useUpdateSettings() {
         method: "PATCH",
         body: JSON.stringify(data),
       }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      qc.invalidateQueries({ queryKey: ["suggestedNextStep"] });
+    },
   });
 }
 
@@ -815,7 +1019,9 @@ export function useRequestReview() {
     (data: { repo: string; prNumber: number; reviewerId: string }) => {
       _startReviewRequest(data, (repo, prNumber) => {
         qc.invalidateQueries({ queryKey: ["reviews", repo, prNumber] });
+        qc.invalidateQueries({ queryKey: ["reviewComments", repo, prNumber] });
         qc.invalidateQueries({ queryKey: ["prStatus", repo, prNumber] });
+        qc.invalidateQueries({ queryKey: ["timeline", repo, prNumber] });
       });
     },
     [qc],
@@ -858,6 +1064,304 @@ export function useRefreshReview() {
       qc.invalidateQueries({
         queryKey: ["reviews", variables.repo, variables.prNumber],
       });
+      qc.invalidateQueries({
+        queryKey: ["timeline", variables.repo, variables.prNumber],
+      });
+    },
+  });
+}
+
+// ---- Local review comments ----
+
+export interface ReviewCommentData {
+  id: number;
+  repo: string;
+  prNumber: number;
+  reviewerId: string;
+  path: string;
+  line: number;
+  body: string;
+  suggestion: string | null;
+  reviewDetails: {
+    severity?: "critical" | "major" | "minor";
+    confidence?: number | null;
+    evidence?: {
+      filesRead: string[];
+      changedLinesChecked: string[];
+      ruleReferences: string[];
+      riskSummary?: string;
+    } | null;
+  } | null;
+  status: string;
+  analysisCategory: string;
+  analysisReasoning: string | null;
+  analysisDetails: {
+    verdict?: "ACTIONABLE" | "DISMISS" | "ALREADY_ADDRESSED";
+    severity?: "MUST_FIX" | "SHOULD_FIX" | "NICE_TO_HAVE" | null;
+    confidence?: number | null;
+    accessMode?: "FULL_CODEBASE" | "DIFF_ONLY";
+    evidence?: {
+      filesRead: string[];
+      symbolsChecked: string[];
+      callersChecked: string[];
+      testsChecked: string[];
+      riskSummary?: string;
+      validationNotes?: string;
+    } | null;
+  } | null;
+  publishedAt: string | null;
+  supersededAt: string | null;
+  fixCommitHash: string | null;
+  fixFilesChanged: string[] | null;
+  fixFixedAt: string | null;
+  createdAt: string;
+}
+
+export function useReviewComments(repo: string, prNumber: number) {
+  const query = useQuery({
+    queryKey: ["reviewComments", repo, prNumber],
+    queryFn: () =>
+      fetchJson<ReviewCommentData[]>(
+        `/api/reviews/${encodeURIComponent(repo)}/${prNumber}/comments`,
+      ),
+    enabled: !!repo && !!prNumber,
+    // Poll frequently when comments are being fixed
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data?.some((c) => c.status === "fixing" || c.status === "analyzing")) return 3000;
+      return false;
+    },
+  });
+  return query;
+}
+
+export function usePublishReview() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { repo: string; prNumber: number; reviewerId: string }) =>
+      fetchJson<{ published: number }>(
+        `/api/reviews/${encodeURIComponent(data.repo)}/${data.prNumber}/${data.reviewerId}/publish`,
+        { method: "POST" },
+      ),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({
+        queryKey: ["reviewComments", variables.repo, variables.prNumber],
+      });
+      qc.invalidateQueries({
+        queryKey: ["reviews", variables.repo, variables.prNumber],
+      });
+      qc.invalidateQueries({
+        queryKey: ["timeline", variables.repo, variables.prNumber],
+      });
+    },
+  });
+}
+
+export function useDismissLocalComment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { repo: string; prNumber: number; commentId: number }) =>
+      fetchJson(
+        `/api/reviews/${encodeURIComponent(data.repo)}/${data.prNumber}/local-comments/${data.commentId}/dismiss`,
+        { method: "POST" },
+      ),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["reviewComments", variables.repo, variables.prNumber] });
+    },
+  });
+}
+
+export function useDeleteLocalComment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { repo: string; prNumber: number; commentId: number }) =>
+      fetchJson(
+        `/api/reviews/${encodeURIComponent(data.repo)}/${data.prNumber}/local-comments/${data.commentId}`,
+        { method: "DELETE" },
+      ),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["reviewComments", variables.repo, variables.prNumber] });
+      qc.invalidateQueries({ queryKey: ["timeline", variables.repo, variables.prNumber] });
+    },
+  });
+}
+
+export function useRecategorizeLocalComment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { repo: string; prNumber: number; commentId: number; category: string }) =>
+      fetchJson(
+        `/api/reviews/${encodeURIComponent(data.repo)}/${data.prNumber}/local-comments/${data.commentId}/recategorize`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: data.category }) },
+      ),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["reviewComments", variables.repo, variables.prNumber] });
+    },
+  });
+}
+
+export function useAnalyzeLocalReviewComments() {
+  const qc = useQueryClient();
+  const [isPending, setIsPending] = useState(false);
+  const [progressState, setProgressState] = useState<AnalysisProgressState | null>(null);
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+
+  const mutate = useCallback(
+    async (data: { repo: string; prNumber: number; commentIds?: number[]; analyzerAgent?: AnalyzerAgent; reviewerId?: string }) => {
+      const key = `${data.repo}:${data.prNumber}`;
+      setIsPending(true);
+      setActiveKey(key);
+      setProgressState({ steps: [], output: [], progress: 0 });
+
+      try {
+        const res = await fetch(
+          `/api/reviews/${encodeURIComponent(data.repo)}/${data.prNumber}/local-comments/analyze`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              commentIds: data.commentIds,
+              analyzerAgent: data.analyzerAgent,
+              reviewerId: data.reviewerId,
+            }),
+          },
+        );
+
+        if (!res.ok) {
+          throw new Error(`${res.status}: ${await res.text()}`);
+        }
+
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("ndjson")) {
+          setIsPending(false);
+          setProgressState(null);
+          setActiveKey(null);
+          qc.invalidateQueries({ queryKey: ["reviewComments", data.repo, data.prNumber] });
+          qc.invalidateQueries({ queryKey: ["timeline", data.repo, data.prNumber] });
+          return;
+        }
+
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop()!;
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const event = JSON.parse(line) as AnalysisProgressEvent;
+
+              if (event.type === "error") {
+                setProgressState((prev) => ({
+                  steps: prev?.steps ?? [],
+                  output: prev?.output ?? [],
+                  progress: 100,
+                  error: event.message,
+                }));
+              } else if (event.type === "complete") {
+                setProgressState((prev) => ({
+                  steps: (prev?.steps ?? []).map((step) => ({ ...step, status: "done" as const })),
+                  output: prev?.output ?? [],
+                  progress: 100,
+                }));
+              } else if (event.step === "claude_output" || event.step === "codex_output") {
+                setProgressState((prev) => ({
+                  steps: prev?.steps ?? [],
+                  output: [...(prev?.output ?? []), event.message],
+                  progress: prev?.progress ?? 50,
+                }));
+              } else {
+                setProgressState((prev) => ({
+                  steps: [
+                    ...((prev?.steps ?? []).map((step) => ({ ...step, status: "done" as const }))),
+                    {
+                      step: event.step,
+                      message: event.message,
+                      detail: event.detail,
+                      status: "active" as const,
+                    },
+                  ],
+                  output: prev?.output ?? [],
+                  progress: event.progress,
+                }));
+              }
+            } catch {
+              // Skip malformed lines
+            }
+          }
+        }
+
+        qc.invalidateQueries({ queryKey: ["reviewComments", data.repo, data.prNumber] });
+        qc.invalidateQueries({ queryKey: ["timeline", data.repo, data.prNumber] });
+      } catch (err) {
+        setProgressState((prev) => ({
+          steps: prev?.steps ?? [],
+          output: prev?.output ?? [],
+          progress: 100,
+          error: String(err),
+        }));
+      } finally {
+        setIsPending(false);
+        setTimeout(() => {
+          setProgressState(null);
+          setActiveKey(null);
+        }, 3000);
+      }
+    },
+    [qc],
+  );
+
+  const progressFor = useCallback(
+    (repo: string, prNumber: number): AnalysisProgressState | null => {
+      if (activeKey !== `${repo}:${prNumber}`) return null;
+      return progressState;
+    },
+    [activeKey, progressState],
+  );
+
+  return { mutate, isPending, progress: progressState, progressFor };
+}
+
+export function useFixLocalComments() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { repo: string; prNumber: number; commentIds?: number[]; fixerAgent: FixerAgent }) =>
+      fetchJson<{ fixing: number }>(
+        `/api/reviews/${encodeURIComponent(data.repo)}/${data.prNumber}/local-comments/fix`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ commentIds: data.commentIds, fixerAgent: data.fixerAgent }),
+        },
+      ),
+    onSuccess: (_data, variables) => {
+      // Poll for results — the fix runs in background
+      qc.invalidateQueries({ queryKey: ["timeline", variables.repo, variables.prNumber] });
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["reviewComments", variables.repo, variables.prNumber] });
+        qc.invalidateQueries({ queryKey: ["prStatus", variables.repo, variables.prNumber] });
+      }, 5000);
+    },
+  });
+}
+
+export function useResetLocalComments() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { repo: string; prNumber: number }) =>
+      fetchJson<{ reset: number }>(
+        `/api/reviews/${encodeURIComponent(data.repo)}/${data.prNumber}/local-comments/reset`,
+        { method: "POST" },
+      ),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["reviewComments", variables.repo, variables.prNumber] });
     },
   });
 }

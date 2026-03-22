@@ -1,5 +1,14 @@
 export type ReviewerId = "greptile" | "claude" | "codex";
 
+export type ReviewCommentSeverity = "critical" | "major" | "minor";
+
+export interface ReviewCommentEvidence {
+  filesRead: string[];
+  changedLinesChecked: string[];
+  ruleReferences: string[];
+  riskSummary?: string;
+}
+
 export interface Reviewer {
   id: ReviewerId;
   displayName: string;
@@ -12,6 +21,9 @@ export interface ReviewComment {
   line: number;
   body: string;
   suggestion?: string; // code suggestion block
+  severity?: ReviewCommentSeverity;
+  confidence?: number | null;
+  evidence?: ReviewCommentEvidence | null;
 }
 
 export interface Review {

@@ -40,10 +40,33 @@ export type AnalysisCategory =
   | "DISMISS"
   | "ALREADY_ADDRESSED";
 
+export type AnalysisVerdict = "ACTIONABLE" | "DISMISS" | "ALREADY_ADDRESSED";
+
+export type AnalysisSeverity =
+  | "MUST_FIX"
+  | "SHOULD_FIX"
+  | "NICE_TO_HAVE";
+
+export type AnalysisAccessMode = "FULL_CODEBASE" | "DIFF_ONLY";
+
+export interface AnalysisEvidence {
+  filesRead: string[];
+  symbolsChecked: string[];
+  callersChecked: string[];
+  testsChecked: string[];
+  riskSummary?: string;
+  validationNotes?: string;
+}
+
 export interface AnalysisResult {
   commentId: number;
   category: AnalysisCategory;
   reasoning: string;
+  verdict?: AnalysisVerdict;
+  severity?: AnalysisSeverity | null;
+  confidence?: number | null;
+  accessMode?: AnalysisAccessMode;
+  evidence?: AnalysisEvidence | null;
   currentCode?: string;
 }
 
@@ -70,6 +93,7 @@ export type PRPhase =
   | "analyzed"
   | "fixing"
   | "fixed"
+  | "merge_ready"
   | "re_review_requested"
   | "waiting_for_review";
 
@@ -86,6 +110,11 @@ export interface PRState {
 
 export interface AppSettings {
   autoReReview: boolean; // Whether to post @greptileai re-review comment after fixing
+  coordinatorEnabled: boolean;
+  coordinatorAgent: "claude" | "codex";
+  defaultAnalyzerAgent: "claude" | "codex";
+  defaultFixerAgent: "claude" | "codex";
+  defaultReviewerIds: Array<"greptile" | "claude" | "codex">;
 }
 
 export interface AppState {

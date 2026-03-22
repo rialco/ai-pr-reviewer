@@ -55,6 +55,7 @@ export class GreptileReviewer implements ReviewerPort {
   async requestReview(
     pr: PRContext,
     onProgress?: (event: ReviewProgress) => void,
+    onDebug?: (debugDetail: Record<string, unknown>) => void,
   ): Promise<Review> {
     const emit = (e: ReviewProgress) => onProgress?.(e);
 
@@ -66,6 +67,16 @@ export class GreptileReviewer implements ReviewerPort {
     });
 
     const body = this.buildReReviewBody(pr.repo, pr.prNumber);
+    onDebug?.({
+      reviewerId: this.id,
+      reviewerName: this.displayName,
+      repo: pr.repo,
+      prNumber: pr.prNumber,
+      prTitle: pr.prTitle,
+      branch: pr.branch,
+      source: "github_comment",
+      prompt: body,
+    });
 
     emit({
       type: "progress",
@@ -257,7 +268,7 @@ export class GreptileReviewer implements ReviewerPort {
     });
 
     if (fixedComments.length === 0) {
-      return "@greptileai Please re-review this PR.\n\nPlease include an updated **Confidence: X/5** score in your review.";
+      return "@greptileai Please re-review this PR.\n\nFocus on newly changed code and direct ripple effects only. Please do not repeat concerns that are already addressed unless the latest diff clearly reintroduces them. Please include an updated **Confidence: X/5** score in your review.";
     }
 
     const allFixResults = prState?.fixResults ?? [];
@@ -291,6 +302,6 @@ ${addressedList.join("\n")}
 ### Modified Files
 ${allFiles.map((f) => `- \`${f}\``).join("\n")}
 
-Please include an updated **Confidence: X/5** score in your review.`;
+Please focus on the modified files and direct ripple effects, avoid repeating already-addressed concerns, and include an updated **Confidence: X/5** score in your review.`;
   }
 }

@@ -1,4 +1,4 @@
-import { exec, spawn } from "child_process";
+import { exec, execSync, spawn } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import os from "os";
@@ -8,6 +8,13 @@ import { appendRunHistory, getRunHistory } from "./db.js";
 import { getReviewService } from "../infrastructure/reviewers/registry.js";
 
 const execAsync = promisify(exec);
+
+export type FixerAgent = "claude" | "codex";
+
+const FIXER_AGENT_META: Record<FixerAgent, { label: string; command: string }> = {
+  claude: { label: "Claude Code", command: "claude" },
+  codex: { label: "Codex", command: "codex" },
+};
 
 // --- Fix progress log (in-memory, keyed by "repo:prNumber") ---
 
@@ -19,8 +26,9 @@ export interface FixLogEntry {
 }
 
 export interface FixProgress {
+  agent: FixerAgent;
   steps: FixLogEntry[];
-  output: string[]; // Live Claude CLI output lines
+  output: string[]; // Live fixer CLI output lines
   startedAt: string;
   finishedAt?: string;
 }
@@ -34,18 +42,26 @@ function fixKey(repo: string, prNumber: number): string {
   return `${repo}:${prNumber}`;
 }
 
-function getOrCreateProgress(repo: string, prNumber: number): FixProgress {
+function getOrCreateProgress(repo: string, prNumber: number, agent: FixerAgent = "claude"): FixProgress {
   const key = fixKey(repo, prNumber);
   let progress = fixLogs.get(key);
   if (!progress) {
-    progress = { steps: [], output: [], startedAt: new Date().toISOString() };
+    progress = { agent, steps: [], output: [], startedAt: new Date().toISOString() };
     fixLogs.set(key, progress);
+  } else if (!progress.agent) {
+    progress.agent = agent;
   }
   return progress;
 }
 
-function logStep(repo: string, prNumber: number, step: string, detail?: string): void {
-  const progress = getOrCreateProgress(repo, prNumber);
+function logStep(
+  repo: string,
+  prNumber: number,
+  step: string,
+  detail?: string,
+  agent: FixerAgent = "claude",
+): void {
+  const progress = getOrCreateProgress(repo, prNumber, agent);
   // Mark previous active step as done
   for (const s of progress.steps) {
     if (s.status === "active") s.status = "done";
@@ -53,8 +69,8 @@ function logStep(repo: string, prNumber: number, step: string, detail?: string):
   progress.steps.push({ step, status: "active", detail, ts: new Date().toISOString() });
 }
 
-function logOutput(repo: string, prNumber: number, line: string): void {
-  const progress = getOrCreateProgress(repo, prNumber);
+function logOutput(repo: string, prNumber: number, line: string, agent: FixerAgent = "claude"): void {
+  const progress = getOrCreateProgress(repo, prNumber, agent);
   progress.output.push(line);
   // Cap at 200 lines to prevent memory bloat
   if (progress.output.length > 200) {
@@ -117,6 +133,19 @@ export function getFixHistory(repo: string, prNumber: number): FixProgress[] {
   const inMemory = fixHistory.get(fixKey(repo, prNumber));
   if (inMemory && inMemory.length > 0) return inMemory;
   return getRunHistory(repo, prNumber) as FixProgress[];
+}
+
+export function isFixerAgentAvailable(agent: FixerAgent): boolean {
+  try {
+    execSync(`which ${FIXER_AGENT_META[agent].command}`, { encoding: "utf-8", timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function getFixerAgentLabel(agent: FixerAgent): string {
+  return FIXER_AGENT_META[agent].label;
 }
 
 // --- Stream JSON parsing helpers ---
@@ -391,13 +420,76 @@ export function runClaudeFix(
   });
 }
 
+export function runCodexFix(
+  workDir: string,
+  prompt: string,
+  onOutput?: (line: string) => void,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "codex",
+      ["exec", "--full-auto", prompt],
+      { cwd: workDir, stdio: ["ignore", "pipe", "pipe"] },
+    );
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      for (const line of text.split("\n")) {
+        if (line.trim()) onOutput?.(line.trim());
+      }
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderr += text;
+      for (const line of text.split("\n")) {
+        if (line.trim()) onOutput?.(line.trim());
+      }
+    });
+
+    child.on("error", (err) => reject(err));
+
+    child.on("close", (code, signal) => {
+      if (signal) {
+        reject(new Error(`codex was killed by signal ${signal}`));
+        return;
+      }
+
+      if (code !== 0) {
+        const cleanStderr = stderr.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "").trim();
+        reject(new Error(`codex exited with code ${code}: ${cleanStderr || "Unknown error"}`));
+        return;
+      }
+
+      onOutput?.("Codex finished (exit code 0)");
+      resolve(stdout.trim());
+    });
+
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("Codex fix timed out after 20 minutes"));
+    }, 1200000);
+
+    child.on("close", () => clearTimeout(timeout));
+  });
+}
+
 // --- Prompt building ---
 
 interface FixInput {
+  agent: FixerAgent;
   comments: BotComment[];
   commentStates: CommentState[];
   prTitle: string;
-  workDir?: string;
+}
+
+function formatPromptList(items: string[] | undefined): string {
+  if (!items || items.length === 0) return "none";
+  return items.join(", ");
 }
 
 export function buildFixPrompt(input: FixInput): string {
@@ -410,36 +502,30 @@ export function buildFixPrompt(input: FixInput): string {
     desc += `- **Category**: ${category}\n`;
     if (c.path) desc += `- **File**: ${c.path}${c.line ? `:${c.line}` : ""}\n`;
     desc += `- **Reviewer comment**: ${c.body}\n`;
+    if (state?.analysis?.verdict) desc += `- **Analysis verdict**: ${state.analysis.verdict}\n`;
+    if (state?.analysis?.severity) desc += `- **Analysis severity**: ${state.analysis.severity}\n`;
+    if (typeof state?.analysis?.confidence === "number") desc += `- **Analysis confidence**: ${state.analysis.confidence}/5\n`;
+    if (state?.analysis?.accessMode) desc += `- **Analysis access mode**: ${state.analysis.accessMode}\n`;
     if (reasoning) desc += `- **Analysis reasoning**: ${reasoning}\n`;
+    if (state?.analysis?.evidence) {
+      desc += `- **Analysis evidence**:\n`;
+      desc += `  - Files read: ${formatPromptList(state.analysis.evidence.filesRead)}\n`;
+      desc += `  - Symbols checked: ${formatPromptList(state.analysis.evidence.symbolsChecked)}\n`;
+      desc += `  - Callers checked: ${formatPromptList(state.analysis.evidence.callersChecked)}\n`;
+      desc += `  - Tests checked: ${formatPromptList(state.analysis.evidence.testsChecked)}\n`;
+      if (state.analysis.evidence.riskSummary) desc += `  - Risk summary: ${state.analysis.evidence.riskSummary}\n`;
+      if (state.analysis.evidence.validationNotes) desc += `  - Validation notes: ${state.analysis.evidence.validationNotes}\n`;
+    }
     if (c.diffHunk) {
       desc += `- **Code being reviewed** (diff hunk):\n\`\`\`diff\n${c.diffHunk}\n\`\`\`\n`;
     }
     return desc;
   });
-
-  // Read CLAUDE.md from the worktree for project conventions
-  let claudeMdSection = "";
-  if (input.workDir) {
-    for (const name of ["CLAUDE.md", "claude.md"]) {
-      const claudeMdPath = path.join(input.workDir, name);
-      if (fs.existsSync(claudeMdPath)) {
-        const content = fs.readFileSync(claudeMdPath, "utf-8");
-        // Strip git workflow sections — we handle git externally
-        const filtered = content
-          .replace(/#+\s*(?:Git Workflow|Git|Worktree).*?(?=\n#+\s|\n---|\z)/gis, "")
-          .trim();
-        if (filtered) {
-          claudeMdSection = `\n## Project Conventions (from CLAUDE.md)\n\n${filtered}\n`;
-        }
-        break;
-      }
-    }
-  }
+  const agentLabel = getFixerAgentLabel(input.agent);
 
   return `You are fixing code review issues on a pull request.
 
 ## PR: ${input.prTitle}
-${claudeMdSection}
 ## Issues to Fix
 
 ${commentDescriptions.join("\n---\n")}
@@ -448,16 +534,21 @@ ${commentDescriptions.join("\n---\n")}
 
 **IMPORTANT: You are already in a git worktree checked out at the correct branch. Do NOT run any git commands (no fetch, no checkout, no merge, no worktree operations). Do NOT create worktrees. Just read and edit files directly in the current directory.**
 
-1. Read the CLAUDE.md file if present to understand project conventions
-2. Read the relevant files mentioned in each issue
-3. Fix each issue with a minimal, targeted diff
-4. If an issue appears to already be fixed in the current code, skip it
-5. Do not make unrelated changes
-6. Do not add unnecessary comments explaining your fixes
-7. After making changes, verify each fix is correct by re-reading the modified files
-8. Follow the project's coding conventions, naming patterns, and style guidelines
+1. Follow visible repository instructions in this worktree, including files like AGENTS.md when present
+2. Read the relevant files before editing; do not rely only on the review comment
+3. Use the analyzer evidence above to avoid breaking callers, contracts, and tests
+4. Fix each issue with a minimal, targeted diff
+5. If an issue is already fixed, leave it alone
+6. Do not make unrelated cleanup changes
+7. Do not add explanatory code comments unless they are necessary for maintainability
+8. Before finishing, run the lightest project validation that proves the change is safe. Prefer existing repo scripts such as typecheck or focused tests when available
+9. If validation fails, keep the code in a debuggable state and stop rather than guessing
+10. If a fix would require a broad refactor, public API change, schema migration, or an unclear product decision, do not force it into this automated pass
 
-Fix all the issues listed above.`;
+When the bot's suggested patch is wrong but the underlying issue is real, implement the safer fix instead of following the suggestion literally.
+The backend will run formatting and verification after you finish, so leave the worktree in a state that should pass those checks.
+
+Fix all the issues listed above. Use ${agentLabel} carefully, keep the diff minimal, and prefer correctness over coverage.`;
 }
 
 export function buildCommitMessage(
@@ -525,7 +616,7 @@ async function runPostFixFormatting(
   // Fall back to prettier if installed
   const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
   if (allDeps.prettier) {
-    // Only format the files Claude actually changed
+    // Only format the files the fixer actually changed
     const files = changedFiles
       .filter((f) => !f.startsWith("."))
       .map((f) => JSON.stringify(f))
@@ -542,49 +633,129 @@ async function runPostFixFormatting(
   }
 }
 
+async function runPostFixVerification(
+  workDir: string,
+  onOutput?: (line: string) => void,
+): Promise<void> {
+  onOutput?.("Running git diff --check");
+  try {
+    await execAsync("git diff --check", { cwd: workDir, timeout: 30000 });
+    onOutput?.("git diff --check passed");
+  } catch (err) {
+    throw new Error(`git diff --check failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const pkgPath = path.join(workDir, "package.json");
+  if (!fs.existsSync(pkgPath)) {
+    onOutput?.("No package.json found; skipped repo verification");
+    return;
+  }
+
+  let pkg: { scripts?: Record<string, string> };
+  try {
+    pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { scripts?: Record<string, string> };
+  } catch {
+    onOutput?.("Could not parse package.json; skipped repo verification");
+    return;
+  }
+
+  const pm = detectPackageManager(workDir);
+  const run = pm === "npm" ? "npm run" : pm;
+  const commands: string[] = [];
+
+  if (pkg.scripts?.typecheck) {
+    commands.push(`${run} typecheck`);
+  } else if (pkg.scripts?.check) {
+    commands.push(`${run} check`);
+  }
+
+  if (commands.length === 0) {
+    onOutput?.("No verification script found; skipped repo verification");
+    return;
+  }
+
+  for (const command of commands) {
+    onOutput?.(`Running ${command}`);
+    try {
+      await execAsync(command, { cwd: workDir, timeout: 180000 });
+      onOutput?.(`${command} passed`);
+    } catch (err) {
+      throw new Error(`Verification failed for "${command}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 // --- Fix comments ---
 
 interface FixCommentsInput {
+  fixerAgent: FixerAgent;
   repo: RepoConfig;
   branch: string;
   prNumber: number;
   prTitle: string;
   comments: BotComment[];
   commentStates: CommentState[];
+  onDebug?: (debugDetail: Record<string, unknown>) => void;
 }
 
 export async function fixComments(input: FixCommentsInput): Promise<FixResult[]> {
-  const { repo, branch, prNumber, comments, commentStates, prTitle } = input;
+  const { fixerAgent, repo, branch, prNumber, comments, commentStates, prTitle, onDebug } = input;
   const repoLabel = repo.label;
+  const agentLabel = getFixerAgentLabel(fixerAgent);
 
-  logStep(repoLabel, prNumber, "Preparing workspace", `Fetching branch ${branch}`);
+  if (!isFixerAgentAvailable(fixerAgent)) {
+    throw new Error(`${agentLabel} CLI is not available on this machine`);
+  }
+
+  logStep(repoLabel, prNumber, "Preparing workspace", `Fetching branch ${branch}`, fixerAgent);
   const { workDir, cleanup } = await getWorkDir(repo, branch);
 
   try {
-    logStep(repoLabel, prNumber, "Running Claude fix", `${comments.length} issue(s) to address`);
-    const prompt = buildFixPrompt({ comments, commentStates, prTitle, workDir });
-    // Log prompt summary so the user can see what Claude receives
-    logOutput(repoLabel, prNumber, `--- Prompt (${prompt.length} chars) ---`);
+    logStep(repoLabel, prNumber, `Running ${agentLabel} fix`, `${comments.length} issue(s) to address`, fixerAgent);
+    const prompt = buildFixPrompt({ agent: fixerAgent, comments, commentStates, prTitle });
+    onDebug?.({
+      fixerAgent,
+      repo: repo.label,
+      prNumber,
+      prTitle,
+      branch,
+      commentIds: comments.map((c) => c.id),
+      commentCount: comments.length,
+      filePaths: [...new Set(comments.map((c) => c.path).filter((path): path is string => Boolean(path)))],
+      comments: comments.map((c) => {
+        const state = commentStates.find((s) => s.commentId === c.id);
+        return {
+          id: c.id,
+          path: c.path,
+          line: c.line,
+          reviewer: c.user,
+          category: state?.analysis?.category ?? null,
+        };
+      }),
+      prompt,
+    });
+    logOutput(repoLabel, prNumber, `--- Prompt (${prompt.length} chars) ---`, fixerAgent);
     for (const c of comments) {
-      logOutput(repoLabel, prNumber, `  #${c.id}: ${c.path ?? "general"}${c.line ? `:${c.line}` : ""} — ${c.body.split("\n")[0].slice(0, 100)}`);
-      logOutput(repoLabel, prNumber, `    diffHunk: ${c.diffHunk ? `${c.diffHunk.length} chars` : "NONE"}`);
+      logOutput(repoLabel, prNumber, `  #${c.id}: ${c.path ?? "general"}${c.line ? `:${c.line}` : ""} — ${c.body.split("\n")[0].slice(0, 100)}`, fixerAgent);
+      logOutput(repoLabel, prNumber, `    diffHunk: ${c.diffHunk ? `${c.diffHunk.length} chars` : "NONE"}`, fixerAgent);
     }
-    logOutput(repoLabel, prNumber, `---`);
+    logOutput(repoLabel, prNumber, "---", fixerAgent);
     // Build path variants to strip from output (macOS resolves /var → /private/var)
     // Use realpath to get the canonical path, then collect both variants, longest first
     let realWorkDir: string;
     try { realWorkDir = fs.realpathSync(workDir); } catch { realWorkDir = workDir; }
     const pathVariants = [...new Set([realWorkDir, workDir])].sort((a, b) => b.length - a.length);
 
-    await runClaudeFix(workDir, prompt, (line) => {
+    const runFix = fixerAgent === "codex" ? runCodexFix : runClaudeFix;
+    await runFix(workDir, prompt, (line) => {
       let cleaned = line;
       for (const p of pathVariants) {
         cleaned = cleaned.replaceAll(p + "/", "").replaceAll(p, ".");
       }
-      logOutput(repoLabel, prNumber, cleaned);
+      logOutput(repoLabel, prNumber, cleaned, fixerAgent);
     });
 
-    logStep(repoLabel, prNumber, "Checking changes");
+    logStep(repoLabel, prNumber, "Checking changes", undefined, fixerAgent);
     const { stdout: diffOutput } = await execAsync("git diff --name-only", {
       cwd: workDir,
     });
@@ -593,7 +764,7 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
     await execAsync("git checkout -- .claude/ 2>/dev/null || true", { cwd: workDir });
 
     if (!diffOutput.trim()) {
-      logStep(repoLabel, prNumber, "No changes needed");
+      logStep(repoLabel, prNumber, "No changes needed", `${agentLabel} produced no diff`, fixerAgent);
       logDone(repoLabel, prNumber);
       return [];
     }
@@ -601,7 +772,7 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
     // Re-check diff after restoring .claude/
     const { stdout: cleanDiff } = await execAsync("git diff --name-only", { cwd: workDir });
     if (!cleanDiff.trim()) {
-      logStep(repoLabel, prNumber, "No source changes (only .claude files were modified)");
+      logStep(repoLabel, prNumber, "No source changes", "Only local instruction files were modified", fixerAgent);
       logDone(repoLabel, prNumber);
       return [];
     }
@@ -609,9 +780,14 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
     const filesChanged = cleanDiff.trim().split("\n").filter(Boolean);
 
     // Run post-fix formatting (prettier, format script, etc.)
-    logStep(repoLabel, prNumber, "Running formatters", `${filesChanged.length} file(s)`);
+    logStep(repoLabel, prNumber, "Running formatters", `${filesChanged.length} file(s)`, fixerAgent);
     await runPostFixFormatting(workDir, filesChanged, (line) => {
-      logOutput(repoLabel, prNumber, line);
+      logOutput(repoLabel, prNumber, line, fixerAgent);
+    });
+
+    logStep(repoLabel, prNumber, "Running verification", undefined, fixerAgent);
+    await runPostFixVerification(workDir, (line) => {
+      logOutput(repoLabel, prNumber, line, fixerAgent);
     });
 
     const commitMessage = buildCommitMessage(comments, commentStates, prTitle);
@@ -623,7 +799,7 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
     const nmSymlink = path.join(workDir, "node_modules");
     try { if (fs.lstatSync(nmSymlink).isSymbolicLink()) fs.unlinkSync(nmSymlink); } catch {}
 
-    logStep(repoLabel, prNumber, "Committing changes", `${filesChanged.length} file(s) modified`);
+    logStep(repoLabel, prNumber, "Committing changes", `${filesChanged.length} file(s) modified`, fixerAgent);
     await execAsync("git add -A", { cwd: workDir });
     const commitMsgFile = path.join(os.tmpdir(), `commit-msg-${Date.now()}.txt`);
     fs.writeFileSync(commitMsgFile, commitMessage, "utf-8");
@@ -635,7 +811,7 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
       try { fs.unlinkSync(commitMsgFile); } catch {}
     }
 
-    logStep(repoLabel, prNumber, "Pushing to remote", `origin/${branch}`);
+    logStep(repoLabel, prNumber, "Pushing to remote", `origin/${branch}`, fixerAgent);
     await execAsync(`git push origin HEAD:refs/heads/${branch}`, {
       cwd: workDir,
       timeout: 60000,
@@ -646,7 +822,7 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
     });
     const commitHash = hashOutput.trim();
 
-    logStep(repoLabel, prNumber, "Fix complete", `Commit ${commitHash}`);
+    logStep(repoLabel, prNumber, "Fix complete", `${agentLabel} created commit ${commitHash}`, fixerAgent);
     logDone(repoLabel, prNumber);
 
     const fixedAt = new Date().toISOString();
