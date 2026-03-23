@@ -805,38 +805,34 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     }
     return counts;
   }, [reviewComments]);
-  const botUsers = detail?.repoBotUsers ?? [];
   const githubComments = detail?.comments ?? [];
   const pendingGithubCommentCount = useMemo(
     () =>
       githubComments.filter(
         (comment) =>
-          botUsers.includes(comment.user) &&
-          (comment.status === "new" || comment.status === "analyzing"),
+          comment.status === "new" || comment.status === "analyzing",
       ).length,
-    [botUsers, githubComments],
+    [githubComments],
   );
   const fixableGithubCommentCount = useMemo(
     () =>
       githubComments.filter(
         (comment) =>
-          botUsers.includes(comment.user) &&
           (comment.status === "analyzed" || comment.status === "fix_failed") &&
           (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX"),
       ).length,
-    [botUsers, githubComments],
+    [githubComments],
   );
   const replyableGithubCommentCount = useMemo(
     () =>
       githubComments.filter(
         (comment) =>
-          botUsers.includes(comment.user) &&
           comment.type === "inline" &&
           comment.status === "fixed" &&
           !comment.repliedAt &&
           !!comment.fixCommitHash,
       ).length,
-    [botUsers, githubComments],
+    [githubComments],
   );
   const reviewerSummaries = useMemo(() => {
     const ids = ["claude", "codex"] as const;
@@ -861,53 +857,45 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     timelineEventDetail ?? (timeline ?? []).find((event) => event._id === selectedTimelineEventId) ?? null;
   const selectedReviewerSummary =
     reviewerSummaries.find((summary) => summary.reviewerId === selectedReviewerId) ?? null;
-  const githubBotComments = useMemo(
-    () => githubComments.filter((comment) => botUsers.includes(comment.user)),
-    [botUsers, githubComments],
-  );
-  const githubOtherComments = useMemo(
-    () => githubComments.filter((comment) => !botUsers.includes(comment.user)),
-    [botUsers, githubComments],
-  );
   const githubPending = useMemo(
-    () => githubBotComments.filter((comment) => comment.status === "new" || comment.status === "analyzing"),
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.status === "new" || comment.status === "analyzing"),
+    [githubComments],
   );
   const githubFixing = useMemo(
-    () => githubBotComments.filter((comment) => comment.status === "fixing"),
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.status === "fixing"),
+    [githubComments],
   );
   const githubFixFailed = useMemo(
-    () => githubBotComments.filter((comment) => comment.status === "fix_failed"),
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.status === "fix_failed"),
+    [githubComments],
   );
   const githubFixed = useMemo(
-    () => githubBotComments.filter((comment) => comment.status === "fixed"),
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.status === "fixed"),
+    [githubComments],
   );
   const githubMustFix = useMemo(
-    () => githubBotComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "MUST_FIX"),
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "MUST_FIX"),
+    [githubComments],
   );
   const githubShouldFix = useMemo(
-    () => githubBotComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "SHOULD_FIX"),
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "SHOULD_FIX"),
+    [githubComments],
   );
   const githubNiceToHave = useMemo(
-    () => githubBotComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "NICE_TO_HAVE"),
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "NICE_TO_HAVE"),
+    [githubComments],
   );
   const githubAlreadyAddressed = useMemo(
-    () => githubBotComments.filter((comment) => comment.analysisCategory === "ALREADY_ADDRESSED"),
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.analysisCategory === "ALREADY_ADDRESSED"),
+    [githubComments],
   );
   const githubDismissedByAnalysis = useMemo(
-    () => githubBotComments.filter((comment) => comment.analysisCategory === "DISMISS"),
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.analysisCategory === "DISMISS"),
+    [githubComments],
   );
   const githubReanalyzableCount = useMemo(
-    () => githubBotComments.filter((comment) => comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed").length,
-    [githubBotComments],
+    () => githubComments.filter((comment) => comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed").length,
+    [githubComments],
   );
   const reviewPending = useMemo(
     () => (reviewComments ?? []).filter((comment) => comment.status === "new" || comment.status === "analyzing"),
@@ -961,7 +949,6 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         { value: "fixed", label: "Fixed", count: githubFixed.length },
         { value: "already_addressed", label: "Addressed", count: githubAlreadyAddressed.length },
         { value: "dismissed", label: "Dismissed", count: githubDismissedByAnalysis.length },
-        { value: "other", label: "Other", count: githubOtherComments.length },
       ];
       return tabs.filter((tab) => tab.value === "all" || tab.count > 0);
     },
@@ -973,7 +960,6 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       githubFixFailed.length,
       githubMustFix.length,
       githubNiceToHave.length,
-      githubOtherComments.length,
       githubPending.length,
       githubShouldFix.length,
     ],
@@ -1023,22 +1009,19 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         return githubAlreadyAddressed;
       case "dismissed":
         return githubDismissedByAnalysis;
-      case "other":
-        return githubOtherComments;
       case "all":
       default:
-        return [...githubBotComments, ...githubOtherComments].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        return [...githubComments].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     }
   }, [
     githubAlreadyAddressed,
-    githubBotComments,
+    githubComments,
     githubDismissedByAnalysis,
     githubFilter,
     githubFixed,
     githubFixFailed,
     githubMustFix,
     githubNiceToHave,
-    githubOtherComments,
     githubPending,
     githubShouldFix,
   ]);
@@ -1723,18 +1706,6 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 </span>
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
-                {availableReviewAgents.map((agent) => (
-                  <Button
-                    key={`github-request-review-${agent}`}
-                    variant="outline"
-                    size="sm"
-                    disabled={!selectedMachineSlug}
-                    onClick={() => void handleRequestReview(agent)}
-                  >
-                    <Users className="h-3.5 w-3.5" />
-                    <AgentInlineLabel agent={agent} prefix="Request review with" />
-                  </Button>
-                ))}
                 {availableAnalyzerAgents.map((agent) => (
                   <Button
                     key={`github-analyze-${agent}`}
@@ -1807,7 +1778,6 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 </div>
 
                 {visibleGithubComments.map((comment) => {
-                  const isBotComment = botUsers.includes(comment.user);
                   const selectedCategory = comment.analysisCategory ?? "UNTRIAGED";
                   return (
                     <Card key={comment._id} className="border-white/8 bg-zinc-900/55 p-4">
@@ -1817,7 +1787,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                             <Badge variant="outline">{comment.user}</Badge>
                             <CommentTypeBadge type={comment.type} />
                             {comment.path ? <Badge variant="outline">{comment.path}{comment.line ? `:${comment.line}` : ""}</Badge> : null}
-                            {isBotComment ? <Badge variant="outline">{comment.status}</Badge> : null}
+                            <Badge variant="outline">{comment.status}</Badge>
                             {comment.analysisCategory ? (
                               <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
                                 {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
@@ -1826,40 +1796,36 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                             <span className="text-xs text-muted-foreground">{formatTimestamp(comment.updatedAt)}</span>
                           </div>
                         </div>
-                        {isBotComment ? (
-                          <Select
-                            value={selectedCategory}
-                            onValueChange={(value) => {
-                              if (value === "UNTRIAGED") return;
-                              void handleRecategorizeGithubComment(
-                                comment._id,
-                                value as "MUST_FIX" | "SHOULD_FIX" | "NICE_TO_HAVE" | "DISMISS" | "ALREADY_ADDRESSED",
-                              );
-                            }}
-                          >
-                            <SelectTrigger className="h-8 w-[170px] bg-transparent text-xs">
-                              <SelectValue placeholder="Set category" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="UNTRIAGED">Pending Triage</SelectItem>
-                              <SelectItem value="MUST_FIX">Must Fix</SelectItem>
-                              <SelectItem value="SHOULD_FIX">Should Fix</SelectItem>
-                              <SelectItem value="NICE_TO_HAVE">Nice to Have</SelectItem>
-                              <SelectItem value="ALREADY_ADDRESSED">Already Addressed</SelectItem>
-                              <SelectItem value="DISMISS">Dismiss</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        ) : null}
+                        <Select
+                          value={selectedCategory}
+                          onValueChange={(value) => {
+                            if (value === "UNTRIAGED") return;
+                            void handleRecategorizeGithubComment(
+                              comment._id,
+                              value as "MUST_FIX" | "SHOULD_FIX" | "NICE_TO_HAVE" | "DISMISS" | "ALREADY_ADDRESSED",
+                            );
+                          }}
+                        >
+                          <SelectTrigger className="h-8 w-[170px] bg-transparent text-xs">
+                            <SelectValue placeholder="Set category" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="UNTRIAGED">Pending Triage</SelectItem>
+                            <SelectItem value="MUST_FIX">Must Fix</SelectItem>
+                            <SelectItem value="SHOULD_FIX">Should Fix</SelectItem>
+                            <SelectItem value="NICE_TO_HAVE">Nice to Have</SelectItem>
+                            <SelectItem value="ALREADY_ADDRESSED">Already Addressed</SelectItem>
+                            <SelectItem value="DISMISS">Dismiss</SelectItem>
+                          </SelectContent>
+                        </Select>
                       </div>
                       <div className="mt-3 text-sm leading-6 text-foreground/88">
                         <MarkdownBody text={comment.body} />
                       </div>
-                      {isBotComment ? (
-                        <AnalysisDetailsPanel
-                          analysisReasoning={comment.analysisReasoning}
-                          analysisDetails={comment.analysisDetails}
-                        />
-                      ) : null}
+                      <AnalysisDetailsPanel
+                        analysisReasoning={comment.analysisReasoning}
+                        analysisDetails={comment.analysisDetails}
+                      />
                       {comment.fixCommitHash ? (
                         <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
                           <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>

@@ -416,7 +416,6 @@ export const enqueueGithubCommentAnalysis = mutation({
     const shouldReanalyze = args.reanalyze === true;
     const pendingComments = githubComments.filter(
       (comment) =>
-        repo.botUsers.includes(comment.user) &&
         (comment.status === undefined ||
           comment.status === "new" ||
           comment.status === "analyzing" ||
@@ -738,7 +737,6 @@ export const enqueueGithubCommentFix = mutation({
       .collect();
     const fixableComments = githubComments.filter(
       (comment) =>
-        repo.botUsers.includes(comment.user) &&
         (comment.status === "analyzed" || comment.status === "fix_failed") &&
         (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX"),
     );
@@ -833,7 +831,6 @@ export const enqueueGithubCommentReply = mutation({
       .collect();
     const replyableComments = githubComments.filter(
       (comment) =>
-        repo.botUsers.includes(comment.user) &&
         comment.type === "inline" &&
         comment.status === "fixed" &&
         !comment.repliedAt &&

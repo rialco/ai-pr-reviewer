@@ -30,10 +30,6 @@ async function getRepoAndPrForMachine(
   return { machine, repo, pr };
 }
 
-function isBotComment(comment: { user: string }, botUsers: string[]) {
-  return botUsers.includes(comment.user);
-}
-
 export const listPendingForMachine = query({
   args: {
     machineToken: v.string(),
@@ -41,7 +37,7 @@ export const listPendingForMachine = query({
     prNumber: v.number(),
   },
   handler: async (ctx, args) => {
-    const { repo, pr } = await getRepoAndPrForMachine(ctx, args.machineToken, args.repoId, args.prNumber);
+    const { pr } = await getRepoAndPrForMachine(ctx, args.machineToken, args.repoId, args.prNumber);
     const comments = await ctx.db
       .query("githubComments")
       .withIndex("by_prId", (q) => q.eq("prId", pr._id))
@@ -50,7 +46,6 @@ export const listPendingForMachine = query({
     return comments
       .filter(
         (comment) =>
-          isBotComment(comment, repo.botUsers) &&
           (comment.status === undefined || comment.status === "new" || comment.status === "analyzing"),
       )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -64,7 +59,7 @@ export const listFixableForMachine = query({
     prNumber: v.number(),
   },
   handler: async (ctx, args) => {
-    const { repo, pr } = await getRepoAndPrForMachine(ctx, args.machineToken, args.repoId, args.prNumber);
+    const { pr } = await getRepoAndPrForMachine(ctx, args.machineToken, args.repoId, args.prNumber);
     const comments = await ctx.db
       .query("githubComments")
       .withIndex("by_prId", (q) => q.eq("prId", pr._id))
@@ -73,7 +68,6 @@ export const listFixableForMachine = query({
     return comments
       .filter(
         (comment) =>
-          isBotComment(comment, repo.botUsers) &&
           comment.status === "fixing" &&
           (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX"),
       )
@@ -88,7 +82,7 @@ export const listReplyableForMachine = query({
     prNumber: v.number(),
   },
   handler: async (ctx, args) => {
-    const { repo, pr } = await getRepoAndPrForMachine(ctx, args.machineToken, args.repoId, args.prNumber);
+    const { pr } = await getRepoAndPrForMachine(ctx, args.machineToken, args.repoId, args.prNumber);
     const comments = await ctx.db
       .query("githubComments")
       .withIndex("by_prId", (q) => q.eq("prId", pr._id))
@@ -97,7 +91,6 @@ export const listReplyableForMachine = query({
     return comments
       .filter(
         (comment) =>
-          isBotComment(comment, repo.botUsers) &&
           comment.type === "inline" &&
           comment.status === "fixed" &&
           !comment.repliedAt &&
@@ -211,15 +204,13 @@ export const finalizeFixResults = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { machine, repo, pr } = await getRepoAndPrForMachine(ctx, args.machineToken, args.repoId, args.prNumber);
+    const { machine, pr } = await getRepoAndPrForMachine(ctx, args.machineToken, args.repoId, args.prNumber);
     const comments = await ctx.db
       .query("githubComments")
       .withIndex("by_prId", (q) => q.eq("prId", pr._id))
       .collect();
     const activeFixingComments = comments.filter(
-      (comment) =>
-        isBotComment(comment, repo.botUsers) &&
-        comment.status === "fixing",
+      (comment) => comment.status === "fixing",
     );
 
     if (args.results.length === 0) {
