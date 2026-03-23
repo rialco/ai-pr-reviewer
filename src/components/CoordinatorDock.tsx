@@ -1,11 +1,14 @@
+import { useMutation, useQuery } from "convex/react";
 import { ChevronDown, Settings2, Sparkles } from "lucide-react";
-import { useAvailableReviewers, useSettings, useUpdateSettings, type ReviewerId } from "../hooks/useApi";
+import { api } from "../../convex/_generated/api";
+import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
 import { AgentLogo, getAgentLabel } from "./ui/agent-logo";
 import { Popover } from "./ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Switch } from "./ui/switch";
 
 const COORDINATOR_CHECK_INTERVAL_SECONDS = 30;
+type ReviewerId = "greptile" | "claude" | "codex";
 const REVIEWER_ORDER: ReviewerId[] = ["claude", "codex", "greptile"];
 
 function PreferencePill({
@@ -50,9 +53,16 @@ interface CoordinatorDockProps {
 }
 
 export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
-  const { data: settings } = useSettings();
-  const { data: reviewers } = useAvailableReviewers();
-  const updateSettings = useUpdateSettings();
+  const { activeWorkspaceId } = useActiveWorkspace();
+  const settings = useQuery(
+    api.settings.getForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+  );
+  const reviewers = useQuery(
+    api.settings.listAvailableReviewers,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+  );
+  const updateSettings = useMutation(api.settings.updateForWorkspace);
   const coordinatorAgent = settings?.coordinatorAgent ?? "claude";
   const coordinatorEnabled = settings?.coordinatorEnabled ?? false;
   const defaultAnalyzerAgent = settings?.defaultAnalyzerAgent ?? "claude";
@@ -61,6 +71,10 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
   const reviewerAvailability = new Map((reviewers ?? []).map((reviewer) => [reviewer.id, reviewer.available]));
 
   const toggleDefaultReviewer = (reviewerId: ReviewerId) => {
+    if (!activeWorkspaceId) {
+      return;
+    }
+
     const next = defaultReviewerIds.includes(reviewerId)
       ? defaultReviewerIds.filter((id) => id !== reviewerId)
       : [...defaultReviewerIds, reviewerId];
@@ -69,7 +83,10 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
       return;
     }
 
-    updateSettings.mutate({ defaultReviewerIds: next });
+    void updateSettings({
+      workspaceId: activeWorkspaceId,
+      defaultReviewerIds: next,
+    });
   };
 
   return (
@@ -96,9 +113,15 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
             <Switch
               checked={coordinatorEnabled}
               size="sm"
-              disabled={updateSettings.isPending}
+              disabled={!activeWorkspaceId}
               aria-label={coordinatorEnabled ? "Disable agent coordinator" : "Enable agent coordinator"}
-              onClick={() => updateSettings.mutate({ coordinatorEnabled: !coordinatorEnabled })}
+              onClick={() => {
+                if (!activeWorkspaceId) return;
+                void updateSettings({
+                  workspaceId: activeWorkspaceId,
+                  coordinatorEnabled: !coordinatorEnabled,
+                });
+              }}
             />
           </div>
 
@@ -108,10 +131,14 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
             </span>
             <Select
               value={coordinatorAgent}
-              onValueChange={(value) =>
-                updateSettings.mutate({ coordinatorAgent: value === "codex" ? "codex" : "claude" })
-              }
-              disabled={updateSettings.isPending}
+              onValueChange={(value) => {
+                if (!activeWorkspaceId) return;
+                void updateSettings({
+                  workspaceId: activeWorkspaceId,
+                  coordinatorAgent: value === "codex" ? "codex" : "claude",
+                });
+              }}
+              disabled={!activeWorkspaceId}
             >
               <SelectTrigger className="h-8 rounded-md border border-border bg-transparent px-2.5 text-xs text-foreground/90 shadow-none focus:ring-0">
                 <SelectValue placeholder="Coordinator" />
@@ -130,10 +157,14 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
               </span>
               <Select
                 value={defaultAnalyzerAgent}
-                onValueChange={(value) =>
-                  updateSettings.mutate({ defaultAnalyzerAgent: value === "codex" ? "codex" : "claude" })
-                }
-                disabled={updateSettings.isPending}
+                onValueChange={(value) => {
+                  if (!activeWorkspaceId) return;
+                  void updateSettings({
+                    workspaceId: activeWorkspaceId,
+                    defaultAnalyzerAgent: value === "codex" ? "codex" : "claude",
+                  });
+                }}
+                disabled={!activeWorkspaceId}
               >
                 <SelectTrigger className="h-8 rounded-md border border-border bg-transparent px-2.5 text-xs text-foreground/90 shadow-none focus:ring-0">
                   <SelectValue placeholder="Analyzer" />
@@ -151,10 +182,14 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
               </span>
               <Select
                 value={defaultFixerAgent}
-                onValueChange={(value) =>
-                  updateSettings.mutate({ defaultFixerAgent: value === "codex" ? "codex" : "claude" })
-                }
-                disabled={updateSettings.isPending}
+                onValueChange={(value) => {
+                  if (!activeWorkspaceId) return;
+                  void updateSettings({
+                    workspaceId: activeWorkspaceId,
+                    defaultFixerAgent: value === "codex" ? "codex" : "claude",
+                  });
+                }}
+                disabled={!activeWorkspaceId}
               >
                 <SelectTrigger className="h-8 rounded-md border border-border bg-transparent px-2.5 text-xs text-foreground/90 shadow-none focus:ring-0">
                   <SelectValue placeholder="Fixer" />
@@ -185,7 +220,7 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
                   selected={defaultReviewerIds.includes(reviewerId)}
                   unavailable={reviewerAvailability.get(reviewerId) === false}
                   disabled={
-                    updateSettings.isPending ||
+                    !activeWorkspaceId ||
                     (defaultReviewerIds.length === 1 && defaultReviewerIds.includes(reviewerId))
                   }
                   onClick={() => toggleDefaultReviewer(reviewerId)}

@@ -48,6 +48,26 @@ function runCommand(binary: string, args: string[], options?: { cwd?: string }) 
   }).trim();
 }
 
+function resolveLocalPath(inputPath: string) {
+  if (inputPath.startsWith("~")) {
+    return path.join(os.homedir(), inputPath.slice(1));
+  }
+
+  return path.resolve(inputPath);
+}
+
+function parseGitHubRemote(remoteUrl: string) {
+  const match = remoteUrl.match(/[/:]([^/]+)\/([^/]+?)(?:\.git)?$/);
+  if (!match) {
+    throw new Error(`Could not parse GitHub remote URL: ${remoteUrl}`);
+  }
+
+  return {
+    owner: match[1],
+    repo: match[2],
+  };
+}
+
 async function registerMachine(client: ConvexHttpClient, config: ReturnType<typeof loadWorkerConfig>) {
   if (!config.enrollmentToken) {
     throw new Error(
@@ -409,37 +429,105 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
   if (job.kind === "machine_command") {
     const command = typeof payload?.command === "string" ? payload.command : null;
 
-    if (command !== "self_check") {
-      throw new Error(`Unsupported machine command: ${command ?? "unknown"}`);
+    if (command === "self_check") {
+      const capabilities = detectCapabilities();
+
+      return {
+        output: [
+          `[self-check] completed at ${now}`,
+          `[self-check] machine=${session.machineId}`,
+          `[self-check] workspace=${session.workspaceId}`,
+          `[self-check] hostname=${os.hostname()}`,
+          `[self-check] platform=${process.platform}/${process.arch}`,
+          `[self-check] cwd=${process.cwd()}`,
+          `[self-check] capabilities=${JSON.stringify(capabilities)}`,
+        ],
+        steps: [
+          {
+            step: "claim",
+            detail: `Claimed by ${os.hostname()}`,
+            status: "done" as const,
+            ts: now,
+          },
+          {
+            step: "self_check",
+            detail: "Collected machine identity and local capability snapshot",
+            status: "done" as const,
+            ts: now,
+          },
+        ],
+      };
     }
 
-    const capabilities = detectCapabilities();
+    if (command === "probe_checkout") {
+      const probeId = typeof payload?.probeId === "string" ? (payload.probeId as Id<"checkoutProbes">) : null;
+      const requestedPath = typeof payload?.requestedPath === "string" ? payload.requestedPath : null;
 
-    return {
-      output: [
-        `[self-check] completed at ${now}`,
-        `[self-check] machine=${session.machineId}`,
-        `[self-check] workspace=${session.workspaceId}`,
-        `[self-check] hostname=${os.hostname()}`,
-        `[self-check] platform=${process.platform}/${process.arch}`,
-        `[self-check] cwd=${process.cwd()}`,
-        `[self-check] capabilities=${JSON.stringify(capabilities)}`,
-      ],
-      steps: [
-        {
-          step: "claim",
-          detail: `Claimed by ${os.hostname()}`,
-          status: "done" as const,
-          ts: now,
-        },
-        {
-          step: "self_check",
-          detail: "Collected machine identity and local capability snapshot",
-          status: "done" as const,
-          ts: now,
-        },
-      ],
-    };
+      if (!probeId || !requestedPath) {
+        throw new Error("probe_checkout payload is missing probeId or requestedPath.");
+      }
+
+      await client.mutation(api.repos.markCheckoutProbeRunning, {
+        machineToken: session.machineToken,
+        probeId,
+      });
+
+      try {
+        const normalizedPath = resolveLocalPath(requestedPath);
+        if (!fs.existsSync(normalizedPath)) {
+          throw new Error(`Path does not exist: ${normalizedPath}`);
+        }
+
+        const stats = fs.statSync(normalizedPath);
+        if (!stats.isDirectory()) {
+          throw new Error(`Path is not a directory: ${normalizedPath}`);
+        }
+
+        const remoteUrl = runCommand("git", ["remote", "get-url", "origin"], { cwd: normalizedPath });
+        const remote = parseGitHubRemote(remoteUrl);
+
+        await client.mutation(api.repos.completeCheckoutProbe, {
+          machineToken: session.machineToken,
+          probeId,
+          normalizedPath,
+          owner: remote.owner,
+          repo: remote.repo,
+          remoteUrl,
+        });
+
+        return {
+          output: [
+            `[probe_checkout] completed at ${now}`,
+            `[probe_checkout] path=${normalizedPath}`,
+            `[probe_checkout] remote=${remoteUrl}`,
+            `[probe_checkout] repo=${remote.owner}/${remote.repo}`,
+          ],
+          steps: [
+            {
+              step: "claim",
+              detail: `Claimed by ${os.hostname()}`,
+              status: "done" as const,
+              ts: now,
+            },
+            {
+              step: "probe_checkout",
+              detail: `Validated ${normalizedPath} and detected ${remote.owner}/${remote.repo}`,
+              status: "done" as const,
+              ts: now,
+            },
+          ],
+        };
+      } catch (error) {
+        await client.mutation(api.repos.failCheckoutProbe, {
+          machineToken: session.machineToken,
+          probeId,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    }
+
+    throw new Error(`Unsupported machine command: ${command ?? "unknown"}`);
   }
 
   if (job.kind === "sync_repo") {

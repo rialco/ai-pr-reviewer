@@ -2,10 +2,9 @@
   "name": "pr-reviewer",
   "version": "1.0.0",
   "type": "module",
-  "description": "Local PR review dashboard — monitors bot comments from Greptile and Copilot",
+  "description": "Cloud control plane for PR review workflows with linked local worker machines",
   "scripts": {
-    "dev": "concurrently -n server,ui -c blue,green \"pnpm dev:server\" \"pnpm dev:ui\"",
-    "dev:server": "tsx watch server/index.ts",
+    "dev": "concurrently -n convex,ui -c blue,green \"pnpm convex:dev\" \"pnpm dev:ui\"",
     "dev:ui": "vite",
     "dev:worker": "tsx watch worker/index.ts",
     "build": "vite build",

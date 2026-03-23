@@ -37,6 +37,18 @@ export default defineSchema({
     .index("by_userId", ["userId"])
     .index("by_workspaceId_userId", ["workspaceId", "userId"]),
 
+  workspaceSettings: defineTable({
+    workspaceId: v.id("workspaces"),
+    autoReReview: v.boolean(),
+    coordinatorEnabled: v.boolean(),
+    coordinatorAgent: v.union(v.literal("claude"), v.literal("codex")),
+    defaultAnalyzerAgent: v.union(v.literal("claude"), v.literal("codex")),
+    defaultFixerAgent: v.union(v.literal("claude"), v.literal("codex")),
+    defaultReviewerIds: v.array(v.string()),
+    createdAt: v.string(),
+    updatedAt: v.string(),
+  }).index("by_workspaceId", ["workspaceId"]),
+
   repos: defineTable({
     workspaceId: v.id("workspaces"),
     owner: v.string(),
@@ -65,6 +77,29 @@ export default defineSchema({
     .index("by_repoId_machineSlug", ["repoId", "machineSlug"])
     .index("by_machineSlug", ["machineSlug"])
     .index("by_workspaceId", ["workspaceId"]),
+
+  checkoutProbes: defineTable({
+    workspaceId: v.id("workspaces"),
+    machineSlug: v.string(),
+    requestedPath: v.string(),
+    normalizedPath: v.optional(v.string()),
+    owner: v.optional(v.string()),
+    repo: v.optional(v.string()),
+    remoteUrl: v.optional(v.string()),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("running"),
+      v.literal("ready"),
+      v.literal("error"),
+    ),
+    errorMessage: v.optional(v.string()),
+    jobId: v.optional(v.id("jobs")),
+    createdByUserId: v.id("users"),
+    createdAt: v.string(),
+    updatedAt: v.string(),
+  })
+    .index("by_workspaceId", ["workspaceId"])
+    .index("by_workspaceId_updatedAt", ["workspaceId", "updatedAt"]),
 
   prs: defineTable({
     workspaceId: v.id("workspaces"),

@@ -1,6 +1,7 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { nowIso, requireWorkspaceAccess } from "./lib/auth";
+import { requireMachineByToken } from "./lib/machineAuth";
 
 const MACHINE_STALE_AFTER_MS = 2 * 60_000;
 
@@ -191,5 +192,158 @@ export const upsertMachineConfig = mutation({
     });
 
     return await ctx.db.get(configId);
+  },
+});
+
+export const requestCheckoutProbe = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    machineSlug: v.string(),
+    requestedPath: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { user } = await requireWorkspaceAccess(ctx, args.workspaceId);
+    const machine = await ctx.db
+      .query("machines")
+      .withIndex("by_workspaceId_slug", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("slug", args.machineSlug),
+      )
+      .unique();
+
+    if (!machine) {
+      throw new Error("Machine not found.");
+    }
+
+    const requestedPath = args.requestedPath.trim();
+    if (!requestedPath) {
+      throw new Error("A local path is required.");
+    }
+
+    const now = nowIso();
+    const probeId = await ctx.db.insert("checkoutProbes", {
+      workspaceId: args.workspaceId,
+      machineSlug: args.machineSlug,
+      requestedPath,
+      status: "queued",
+      createdByUserId: user._id,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const jobId = await ctx.db.insert("jobs", {
+      workspaceId: args.workspaceId,
+      createdByUserId: user._id,
+      kind: "machine_command",
+      status: "queued",
+      targetMachineSlug: args.machineSlug,
+      title: `Inspect checkout ${requestedPath}`,
+      payload: {
+        command: "probe_checkout",
+        probeId,
+        requestedPath,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.patch(probeId, {
+      jobId,
+      updatedAt: now,
+    });
+
+    return await ctx.db.get(probeId);
+  },
+});
+
+export const getCheckoutProbe = query({
+  args: {
+    workspaceId: v.id("workspaces"),
+    probeId: v.id("checkoutProbes"),
+  },
+  handler: async (ctx, args) => {
+    await requireWorkspaceAccess(ctx, args.workspaceId);
+    const probe = await ctx.db.get(args.probeId);
+    if (!probe || probe.workspaceId !== args.workspaceId) {
+      return null;
+    }
+    return probe;
+  },
+});
+
+export const markCheckoutProbeRunning = mutation({
+  args: {
+    machineToken: v.string(),
+    probeId: v.id("checkoutProbes"),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const probe = await ctx.db.get(args.probeId);
+
+    if (!probe || probe.workspaceId !== machine.workspaceId || probe.machineSlug !== machine.slug) {
+      throw new Error("Checkout probe not found for this machine.");
+    }
+
+    await ctx.db.patch(probe._id, {
+      status: "running",
+      errorMessage: undefined,
+      updatedAt: nowIso(),
+    });
+
+    return { ok: true };
+  },
+});
+
+export const completeCheckoutProbe = mutation({
+  args: {
+    machineToken: v.string(),
+    probeId: v.id("checkoutProbes"),
+    normalizedPath: v.string(),
+    owner: v.string(),
+    repo: v.string(),
+    remoteUrl: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const probe = await ctx.db.get(args.probeId);
+
+    if (!probe || probe.workspaceId !== machine.workspaceId || probe.machineSlug !== machine.slug) {
+      throw new Error("Checkout probe not found for this machine.");
+    }
+
+    await ctx.db.patch(probe._id, {
+      normalizedPath: args.normalizedPath,
+      owner: args.owner,
+      repo: args.repo,
+      remoteUrl: args.remoteUrl,
+      status: "ready",
+      errorMessage: undefined,
+      updatedAt: nowIso(),
+    });
+
+    return await ctx.db.get(probe._id);
+  },
+});
+
+export const failCheckoutProbe = mutation({
+  args: {
+    machineToken: v.string(),
+    probeId: v.id("checkoutProbes"),
+    errorMessage: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const probe = await ctx.db.get(args.probeId);
+
+    if (!probe || probe.workspaceId !== machine.workspaceId || probe.machineSlug !== machine.slug) {
+      throw new Error("Checkout probe not found for this machine.");
+    }
+
+    await ctx.db.patch(probe._id, {
+      status: "error",
+      errorMessage: args.errorMessage,
+      updatedAt: nowIso(),
+    });
+
+    return await ctx.db.get(probe._id);
   },
 });
