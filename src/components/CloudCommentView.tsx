@@ -1706,7 +1706,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         <Card className="overflow-hidden bg-surface">
           <SectionHeader title="Review Confidence" pipClassName="bg-should-fix" />
           <div className="px-4 py-3">
-            <div className="space-y-3">
+            <div className="divide-y divide-border/60 rounded-lg border border-border/60 bg-black/10">
               {reviewerSummaries.map((summary) => {
                 const available = summary.reviewerId === "claude"
                   ? Boolean(selectedMachineRecord?.capabilities.claude)
@@ -1715,7 +1715,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 const hasSummary = Boolean(summary.latestReview?.summary);
 
                 return (
-                  <div key={summary.reviewerId} className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
+                  <div key={summary.reviewerId} className="px-3 py-3">
                     <div className="flex min-w-0 items-center gap-3">
                       <div className="flex min-w-[140px] flex-1 items-center gap-2">
                         <AgentLogo agent={summary.reviewerId} className="h-4 w-4 shrink-0" />
