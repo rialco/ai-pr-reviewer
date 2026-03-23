@@ -311,6 +311,23 @@ export const listTimelineForWorkspace = query({
   },
 });
 
+export const getTimelineEventForWorkspace = query({
+  args: {
+    workspaceId: v.id("workspaces"),
+    eventId: v.id("timelineEvents"),
+  },
+  handler: async (ctx, args) => {
+    await requireWorkspaceAccess(ctx, args.workspaceId);
+
+    const event = await ctx.db.get(args.eventId);
+    if (!event || event.workspaceId !== args.workspaceId) {
+      return null;
+    }
+
+    return event;
+  },
+});
+
 export const dashboardSummary = query({
   args: {
     workspaceId: v.id("workspaces"),

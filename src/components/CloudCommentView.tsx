@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "convex/react";
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, Loader2, Minus, Plus, RefreshCw } from "lucide-react";
+import { AlertCircle, Check, ChevronRight, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, Loader2, Minus, Plus, RefreshCw } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
 import { Badge } from "./ui/badge";
@@ -16,6 +16,23 @@ interface CloudCommentViewProps {
   repo: string;
   prNumber: number;
 }
+
+type TimelineHistoryStep = {
+  step: string;
+  status: "active" | "done" | "error";
+  detail?: string;
+  ts: string;
+};
+
+type TimelineRunHistory = {
+  status?: string;
+  startedAt: string;
+  finishedAt?: string;
+  currentStep?: string;
+  detail?: string;
+  steps: TimelineHistoryStep[];
+  output: string[];
+};
 
 const categoryVariant: Record<string, "must_fix" | "should_fix" | "nice_to_have" | "dismiss" | "already_addressed"> = {
   MUST_FIX: "must_fix",
@@ -47,6 +64,27 @@ function formatRelativeTime(value: string) {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+function formatDuration(startDate: string, endDate: string) {
+  const totalSeconds = Math.max(0, Math.floor((new Date(endDate).getTime() - new Date(startDate).getTime()) / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function getTimelineRunHistory(debugDetail: Record<string, unknown> | null) {
+  const raw = debugDetail?.history;
+  if (!raw || typeof raw !== "object") return null;
+  const candidate = raw as Partial<TimelineRunHistory>;
+  if (!Array.isArray(candidate.steps) || !Array.isArray(candidate.output) || typeof candidate.startedAt !== "string") {
+    return null;
+  }
+  return candidate as TimelineRunHistory;
 }
 
 function CommentTypeBadge({ type }: { type: "inline" | "review" | "issue_comment" }) {
@@ -174,9 +212,16 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [replyError, setReplyError] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
+  const [timelineTab, setTimelineTab] = useState<"history" | "parameters" | "prompt">("history");
   const [selectedReviewerId, setSelectedReviewerId] = useState<"claude" | "codex" | null>(null);
   const [showBody, setShowBody] = useState(false);
   const [showAllFiles, setShowAllFiles] = useState(false);
+  const timelineEventDetail = useQuery(
+    api.prs.getTimelineEventForWorkspace,
+    activeWorkspaceId && selectedTimelineEventId
+      ? { workspaceId: activeWorkspaceId, eventId: selectedTimelineEventId as never }
+      : "skip",
+  );
 
   const repoMachineConfigs = useMemo(
     () => (machineConfigs ?? []).filter((config) => config.repoLabel === repo),
@@ -293,9 +338,13 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     });
   }, [reviewComments, reviews]);
   const selectedTimelineEvent =
-    (timeline ?? []).find((event) => event._id === selectedTimelineEventId) ?? null;
+    timelineEventDetail ?? (timeline ?? []).find((event) => event._id === selectedTimelineEventId) ?? null;
   const selectedReviewerSummary =
     reviewerSummaries.find((summary) => summary.reviewerId === selectedReviewerId) ?? null;
+
+  useEffect(() => {
+    setTimelineTab("history");
+  }, [selectedTimelineEventId]);
 
   if (!activeWorkspaceId || detail === undefined) {
     return (
@@ -1078,16 +1127,152 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         contentClassName="max-w-2xl"
       >
         {selectedTimelineEvent ? (
-          <div className="space-y-4">
-            {formatTimelineDetail(selectedTimelineEvent) ? (
-              <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3 text-sm text-muted-foreground">
-                {formatTimelineDetail(selectedTimelineEvent)}
+          (() => {
+            const debugDetail =
+              selectedTimelineEvent.debugDetail && typeof selectedTimelineEvent.debugDetail === "object"
+                ? (selectedTimelineEvent.debugDetail as Record<string, unknown>)
+                : null;
+            const history = getTimelineRunHistory(debugDetail);
+            const prompt = typeof debugDetail?.prompt === "string" ? debugDetail.prompt : null;
+            const parameters = debugDetail
+              ? Object.fromEntries(
+                  Object.entries(debugDetail).filter(([key]) => key !== "prompt" && key !== "history"),
+                )
+              : null;
+            const hasParameters = parameters && Object.keys(parameters).length > 0;
+            const detailSummary = formatTimelineDetail(selectedTimelineEvent);
+
+            return (
+              <div className="space-y-4">
+                {detailSummary ? (
+                  <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3 text-sm text-muted-foreground">
+                    {detailSummary}
+                  </div>
+                ) : null}
+
+                <div className="flex items-center gap-2 border-b border-border pb-3">
+                  <Button
+                    variant={timelineTab === "history" ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={() => setTimelineTab("history")}
+                  >
+                    History
+                  </Button>
+                  <Button
+                    variant={timelineTab === "parameters" ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={() => setTimelineTab("parameters")}
+                  >
+                    Parameters
+                  </Button>
+                  <Button
+                    variant={timelineTab === "prompt" ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={() => setTimelineTab("prompt")}
+                    disabled={!prompt}
+                  >
+                    Prompt
+                  </Button>
+                </div>
+
+                {!debugDetail ? (
+                  <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
+                    Debug details are not available for this event yet.
+                  </div>
+                ) : timelineTab === "history" ? (
+                  history ? (
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">{history.status}</Badge>
+                        <span className="text-xs text-muted-foreground/80">
+                          Started {formatTimestamp(history.startedAt)}
+                        </span>
+                        <span className="text-xs text-muted-foreground/80">
+                          Duration {formatDuration(history.startedAt, history.finishedAt ?? new Date().toISOString())}
+                        </span>
+                      </div>
+
+                      {history.steps.length > 0 ? (
+                        <div className="rounded-lg border border-border bg-surface/80">
+                          <div className="border-b border-border px-4 py-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                            Steps
+                          </div>
+                          <div className="divide-y divide-border/60">
+                            {history.steps.map((step, index) => (
+                              <div key={`${step.ts}-${index}`} className="flex items-start gap-2 px-4 py-3">
+                                {step.status === "done" ? (
+                                  <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                                ) : step.status === "error" ? (
+                                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+                                ) : (
+                                  <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+                                )}
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="text-sm text-foreground/90">{step.step}</span>
+                                    <span className="text-[11px] tabular-nums text-muted-foreground/60">
+                                      {new Date(step.ts).toLocaleTimeString([], {
+                                        hour: "numeric",
+                                        minute: "2-digit",
+                                        second: "2-digit",
+                                      })}
+                                    </span>
+                                  </div>
+                                  {step.detail ? (
+                                    <p className="mt-1 text-xs leading-5 text-muted-foreground/80">{step.detail}</p>
+                                  ) : null}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
+                          Run history has not captured any step transitions yet.
+                        </div>
+                      )}
+
+                      {history.output.length > 0 ? (
+                        <div className="rounded-lg border border-border bg-surface/80">
+                          <div className="border-b border-border px-4 py-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                            Output
+                          </div>
+                          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-[11px] leading-5 text-foreground/78">
+                            {history.output.join("\n")}
+                          </pre>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
+                      Run history is not available for this event yet.
+                    </div>
+                  )
+                ) : timelineTab === "prompt" ? (
+                  prompt ? (
+                    <pre className="overflow-x-auto rounded-lg border border-border bg-surface p-4 text-xs leading-6 text-foreground/80 whitespace-pre-wrap break-words">
+                      {prompt}
+                    </pre>
+                  ) : (
+                    <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
+                      No prompt was captured for this event.
+                    </div>
+                  )
+                ) : hasParameters ? (
+                  <pre className="overflow-x-auto rounded-lg border border-border bg-surface p-4 text-xs leading-6 text-foreground/80">
+                    {JSON.stringify(parameters, null, 2)}
+                  </pre>
+                ) : (
+                  <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
+                    No structured parameters were captured for this event.
+                  </div>
+                )}
               </div>
-            ) : null}
-            <pre className="overflow-x-auto rounded-lg border border-white/8 bg-black/10 p-3 text-xs leading-6 text-muted-foreground">
-              {JSON.stringify(selectedTimelineEvent.detail, null, 2)}
-            </pre>
-          </div>
+            );
+          })()
         ) : null}
       </Dialog>
 
