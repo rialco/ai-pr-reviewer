@@ -340,14 +340,26 @@ function AnalysisDetailsPanel({
   if (!analysisReasoning && !analysisDetails && !suggestion) return null;
 
   return (
-    <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-100/90">
+    <div
+      className={cn(
+        "mt-3 rounded-lg px-3 py-2 text-sm transition-colors",
+        expanded
+          ? "border border-emerald-500/20 bg-emerald-500/5 text-emerald-100/90"
+          : "border border-border/60 bg-background/45 text-muted-foreground",
+      )}
+    >
       <button
         type="button"
         className="flex w-full items-center justify-between gap-3 text-left"
         onClick={() => setExpanded((value) => !value)}
       >
         <div className="flex items-center gap-2">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
+          <p
+            className={cn(
+              "text-[11px] font-medium",
+              expanded ? "text-emerald-300/80" : "text-emerald-300/70",
+            )}
+          >
             Analysis
           </p>
           {analysisDetails?.severity ? (
@@ -359,7 +371,11 @@ function AnalysisDetailsPanel({
             <Badge variant="outline">Confidence {analysisDetails.confidence}/5</Badge>
           ) : null}
         </div>
-        {expanded ? <ChevronDown className="h-3.5 w-3.5 text-emerald-300/70" /> : <ChevronRight className="h-3.5 w-3.5 text-emerald-300/70" />}
+        {expanded ? (
+          <ChevronDown className="h-3.5 w-3.5 text-emerald-300/70" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 text-emerald-300/70" />
+        )}
       </button>
 
       {expanded ? (
