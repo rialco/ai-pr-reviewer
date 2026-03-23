@@ -1,59 +1,15 @@
 import { useState } from "react";
-import { useQuery } from "convex/react";
 import { AddRepo } from "./components/AddRepo";
+import { AppActivityCenter } from "./components/AppActivityCenter";
+import { AppCommentPanel } from "./components/AppCommentPanel";
+import { AppRepoCountBadge } from "./components/AppRepoCountBadge";
 import { CoordinatorDock } from "./components/CoordinatorDock";
 import { RepoList } from "./components/RepoList";
 import { PRList } from "./components/PRList";
-import { CommentView } from "./components/CommentView";
-import { CloudCommentView } from "./components/CloudCommentView";
-import { JobCenter } from "./components/JobCenter";
-import { CloudJobCenter } from "./components/CloudJobCenter";
-import { useSummary } from "./hooks/useApi";
-import { useActiveWorkspace } from "./hooks/useActiveWorkspace";
+import { useAppSummary } from "./hooks/useAppSummary";
 import { hasCloudEnv } from "./lib/cloud";
 import { cn } from "./lib/utils";
 import { ChevronDown, ChevronRight, Github, MessageSquare } from "lucide-react";
-import { api } from "../convex/_generated/api";
-
-function LocalRepoCountBadge() {
-  const { data: summary } = useSummary();
-
-  return (
-    <span className="rounded-full border border-border/70 bg-muted/20 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-      {summary?.repos ?? 0} Repo{summary?.repos === 1 ? "" : "s"}
-    </span>
-  );
-}
-
-function CloudRepoCountBadge() {
-  const { activeWorkspaceId } = useActiveWorkspace();
-  const repos = useQuery(
-    api.repos.listForWorkspace,
-    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
-  );
-
-  return (
-    <span className="rounded-full border border-border/70 bg-muted/20 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-      {repos?.length ?? 0} Repo{repos?.length === 1 ? "" : "s"}
-    </span>
-  );
-}
-
-function RepoCountBadge() {
-  return hasCloudEnv ? <CloudRepoCountBadge /> : <LocalRepoCountBadge />;
-}
-
-function useAppSummary() {
-  if (hasCloudEnv) {
-    const { activeWorkspaceId } = useActiveWorkspace();
-    return useQuery(
-      api.prs.dashboardSummary,
-      activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
-    );
-  }
-
-  return useSummary().data;
-}
 
 export function App() {
   const [selectedPR, setSelectedPR] = useState<{
@@ -94,7 +50,7 @@ export function App() {
                   Repositories
                 </p>
               </div>
-              <RepoCountBadge />
+              <AppRepoCountBadge />
             </button>
             <div
               id="repo-sidebar-section"
@@ -125,21 +81,12 @@ export function App() {
               open={footerPopover === "coordinator"}
               onOpenChange={(open) => setFooterPopover(open ? "coordinator" : null)}
             />
-            {hasCloudEnv ? (
-              <CloudJobCenter
-                open={footerPopover === "activity"}
-                onOpenChange={(open) => setFooterPopover(open ? "activity" : null)}
-                onNavigateToPR={(repo, prNumber) => setSelectedPR({ repo, prNumber })}
-                lastPollAt={summary?.lastPollAt ?? null}
-              />
-            ) : (
-              <JobCenter
-                open={footerPopover === "activity"}
-                onOpenChange={(open) => setFooterPopover(open ? "activity" : null)}
-                onNavigateToPR={(repo, prNumber) => setSelectedPR({ repo, prNumber })}
-                lastPollAt={summary?.lastPollAt ?? null}
-              />
-            )}
+            <AppActivityCenter
+              open={footerPopover === "activity"}
+              onOpenChange={(open) => setFooterPopover(open ? "activity" : null)}
+              onNavigateToPR={(repo, prNumber) => setSelectedPR({ repo, prNumber })}
+              lastPollAt={summary?.lastPollAt ?? null}
+            />
           </div>
         </div>
       </aside>
@@ -151,11 +98,7 @@ export function App() {
             key={`${selectedPR.repo}:${selectedPR.prNumber}`}
             className="animate-enter-fade-slide"
           >
-            {hasCloudEnv ? (
-              <CloudCommentView repo={selectedPR.repo} prNumber={selectedPR.prNumber} />
-            ) : (
-              <CommentView repo={selectedPR.repo} prNumber={selectedPR.prNumber} />
-            )}
+            <AppCommentPanel repo={selectedPR.repo} prNumber={selectedPR.prNumber} />
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
