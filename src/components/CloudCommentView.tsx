@@ -2071,9 +2071,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                       </div>
                     ) : null}
                     {comment.publishedAt ? (
-                      <div className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-sm text-violet-100/90">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">Published</p>
-                        <p className="mt-2 text-sm leading-6">Sent to GitHub on {formatTimestamp(comment.publishedAt)}</p>
+                      <div className="mt-3 inline-flex max-w-full items-center gap-2 rounded-md border border-violet-500/20 bg-violet-500/5 px-3 py-1.5 text-xs text-violet-100/85">
+                        <Upload className="h-3.5 w-3.5 shrink-0 text-violet-300/80" />
+                        <span className="font-medium text-violet-200/90">Published</span>
+                        <span className="truncate text-violet-100/75">Sent to GitHub on {formatTimestamp(comment.publishedAt)}</span>
                       </div>
                     ) : null}
                   </Card>
