@@ -3,6 +3,7 @@ import { AddRepo } from "./components/AddRepo";
 import { AppActivityCenter } from "./components/AppActivityCenter";
 import { AppCommentPanel } from "./components/AppCommentPanel";
 import { AppRepoCountBadge } from "./components/AppRepoCountBadge";
+import { CloudControlDock } from "./components/CloudControlDock";
 import { CoordinatorDock } from "./components/CoordinatorDock";
 import { RepoList } from "./components/RepoList";
 import { PRList } from "./components/PRList";
@@ -15,7 +16,7 @@ export function App() {
     repo: string;
     prNumber: number;
   } | null>(null);
-  const [footerPopover, setFooterPopover] = useState<"activity" | "coordinator" | null>(null);
+  const [footerPopover, setFooterPopover] = useState<"activity" | "coordinator" | "cloud" | null>(null);
   const [reposCollapsed, setReposCollapsed] = useState(false);
   const summary = useAppSummary();
 
@@ -76,6 +77,10 @@ export function App() {
 
         <div className="border-t border-border bg-card/60 p-3">
           <div className="space-y-2 overflow-visible">
+            <CloudControlDock
+              open={footerPopover === "cloud"}
+              onOpenChange={(open) => setFooterPopover(open ? "cloud" : null)}
+            />
             <CoordinatorDock
               open={footerPopover === "coordinator"}
               onOpenChange={(open) => setFooterPopover(open ? "coordinator" : null)}
