@@ -10,7 +10,7 @@ import { buildReviewPrompt, parseReviewOutput } from "../server/infrastructure/r
 import { formatGitHubCommentBody } from "../server/infrastructure/reviewers/reviewPrompt";
 import { analyzeComments, type AnalysisProgressEvent, type AnalyzerAgent } from "../server/services/analyzer";
 import { fixComments, type FixerAgent } from "../server/services/fixer";
-import { getPRDiff, submitPRReview } from "../server/services/github";
+import { getPRDiff, replyToReviewComment, submitPRReview } from "../server/services/github";
 import { fetchOrigin } from "../server/services/git";
 import type { BotComment, CommentState, RepoConfig } from "../server/types";
 import {
@@ -777,6 +777,157 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
         : null;
 
     if (
+      source === "github_comments" &&
+      repoId &&
+      repoLabel &&
+      owner &&
+      repoName &&
+      prNumber &&
+      prTitle &&
+      localPath &&
+      analyzerAgent
+    ) {
+      const pendingComments = await client.query(api.githubComments.listPendingForMachine, {
+        machineToken: session.machineToken,
+        repoId,
+        prNumber,
+      });
+
+      if (pendingComments.length === 0) {
+        return {
+          output: [
+            `[analyze_comments] completed at ${now}`,
+            `[analyze_comments] repo=${repoLabel}`,
+            "[analyze_comments] source=github_comments",
+            "[analyze_comments] no pending GitHub comments found",
+          ],
+          steps: [
+            {
+              step: "load_github_comments",
+              detail: "No pending GitHub comments to analyze",
+              status: "done" as const,
+              ts: now,
+            },
+          ],
+        };
+      }
+
+      const commentIdMap = new Map<number, Id<"githubComments">>();
+      const botComments: BotComment[] = pendingComments.map((comment, index) => {
+        const syntheticId = index + 1;
+        commentIdMap.set(syntheticId, comment._id);
+        return {
+          id: syntheticId,
+          prNumber,
+          prTitle,
+          prUrl: `https://github.com/${repoLabel}/pull/${prNumber}`,
+          repo: repoLabel,
+          path: comment.path ?? null,
+          line: comment.line ?? null,
+          diffHunk: comment.diffHunk ?? null,
+          body: comment.body,
+          user: comment.user,
+          createdAt: comment.createdAt,
+          url: comment.githubUrl ?? null,
+          type: comment.type,
+        };
+      });
+      const repoConfig: RepoConfig = {
+        owner,
+        repo: repoName,
+        label: repoLabel,
+        botUsers: [],
+        localPath,
+      };
+      const progressOutput: string[] = [];
+      const analysisResults = await analyzeComments(
+        botComments,
+        repoConfig,
+        analyzerAgent,
+        (event: AnalysisProgressEvent) => {
+          if (event.type !== "progress") {
+            return;
+          }
+          if (event.step === "claude_output" || event.step === "codex_output") {
+            progressOutput.push(event.message);
+            return;
+          }
+          if (event.detail) {
+            progressOutput.push(`${event.step}: ${event.message} · ${event.detail}`);
+            return;
+          }
+          progressOutput.push(`${event.step}: ${event.message}`);
+        },
+      );
+
+      await client.mutation(api.githubComments.applyAnalysisResults, {
+        machineToken: session.machineToken,
+        repoId,
+        prNumber,
+        analyzerAgent,
+        results: analysisResults
+          .map((result) => {
+            const commentId = commentIdMap.get(result.commentId);
+            if (!commentId) {
+              return null;
+            }
+
+            return {
+              commentId,
+              category: result.category,
+              reasoning: result.reasoning,
+              verdict: result.verdict,
+              severity: result.severity ?? undefined,
+              confidence: result.confidence ?? undefined,
+              accessMode: result.accessMode,
+              evidence: result.evidence
+                ? {
+                    filesRead: result.evidence.filesRead,
+                    symbolsChecked: result.evidence.symbolsChecked,
+                    callersChecked: result.evidence.callersChecked,
+                    testsChecked: result.evidence.testsChecked,
+                    riskSummary: result.evidence.riskSummary,
+                    validationNotes: result.evidence.validationNotes,
+                  }
+                : undefined,
+            };
+          })
+          .filter((result): result is NonNullable<typeof result> => result !== null),
+      });
+
+      return {
+        output: [
+          `[analyze_comments] completed at ${now}`,
+          `[analyze_comments] repo=${repoLabel}`,
+          "[analyze_comments] source=github_comments",
+          `[analyze_comments] analyzer=${analyzerAgent}`,
+          `[analyze_comments] analyzed=${analysisResults.length}`,
+          ...progressOutput.slice(-12),
+        ],
+        steps: [
+          {
+            step: "load_github_comments",
+            detail: `${pendingComments.length} pending GitHub comment(s)`,
+            status: "done" as const,
+            ts: now,
+          },
+          {
+            step: "triage_github_comments",
+            detail: analyzerAgent,
+            status: "done" as const,
+            ts: now,
+          },
+          {
+            step: "persist_github_analysis",
+            detail: `Stored ${analysisResults.length} GitHub comment analysis result(s) in Convex`,
+            status: "done" as const,
+            ts: now,
+          },
+        ],
+      };
+    }
+
+    if (
       source !== "local_review_comments" ||
       !repoId ||
       !repoLabel ||
@@ -952,6 +1103,190 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
       payload?.fixerAgent === "claude" || payload?.fixerAgent === "codex"
         ? (payload.fixerAgent as FixerAgent)
         : null;
+
+    if (
+      source === "github_comments" &&
+      repoId &&
+      repoLabel &&
+      owner &&
+      repoName &&
+      prNumber &&
+      prTitle &&
+      branch &&
+      localPath &&
+      fixerAgent
+    ) {
+      const capabilities = detectCapabilities();
+      if (fixerAgent === "claude" && !capabilities.claude) {
+        throw new Error("Claude CLI is not available on this machine.");
+      }
+      if (fixerAgent === "codex" && !capabilities.codex) {
+        throw new Error("Codex CLI is not available on this machine.");
+      }
+
+      const fixableComments = await client.query(api.githubComments.listFixableForMachine, {
+        machineToken: session.machineToken,
+        repoId,
+        prNumber,
+      });
+
+      if (fixableComments.length === 0) {
+        await client.mutation(api.githubComments.finalizeFixResults, {
+          machineToken: session.machineToken,
+          repoId,
+          prNumber,
+          fixerAgent,
+          results: [],
+        });
+
+        return {
+          output: [
+            `[fix_comments] completed at ${now}`,
+            `[fix_comments] repo=${repoLabel}`,
+            "[fix_comments] source=github_comments",
+            `[fix_comments] fixer=${fixerAgent}`,
+            "[fix_comments] no actionable GitHub comments found",
+          ],
+          steps: [
+            {
+              step: "load_fixable_github_comments",
+              detail: "No actionable GitHub comments to fix",
+              status: "done" as const,
+              ts: now,
+            },
+          ],
+        };
+      }
+
+      const commentIdMap = new Map<number, Id<"githubComments">>();
+      const botComments: BotComment[] = fixableComments.map((comment, index) => {
+        const syntheticId = index + 1;
+        commentIdMap.set(syntheticId, comment._id);
+        return {
+          id: syntheticId,
+          prNumber,
+          prTitle,
+          prUrl: `https://github.com/${repoLabel}/pull/${prNumber}`,
+          repo: repoLabel,
+          path: comment.path ?? null,
+          line: comment.line ?? null,
+          diffHunk: comment.diffHunk ?? null,
+          body: comment.body,
+          user: comment.user,
+          createdAt: comment.createdAt,
+          url: comment.githubUrl ?? null,
+          type: comment.type,
+        };
+      });
+      const commentStates: CommentState[] = fixableComments.map((comment, index) => {
+        const syntheticId = index + 1;
+        return {
+          commentId: syntheticId,
+          repo: repoLabel,
+          prNumber,
+          status: "analyzed",
+          analysis: {
+            commentId: syntheticId,
+            category:
+              (comment.analysisCategory as NonNullable<CommentState["analysis"]>["category"]) ??
+              "SHOULD_FIX",
+            reasoning: comment.analysisReasoning ?? comment.body,
+            verdict: comment.analysisDetails?.verdict,
+            severity: comment.analysisDetails?.severity ?? null,
+            confidence: comment.analysisDetails?.confidence ?? null,
+            accessMode: comment.analysisDetails?.accessMode,
+            evidence: comment.analysisDetails?.evidence ?? null,
+          },
+          seenAt: comment.createdAt,
+        };
+      });
+      const repoConfig: RepoConfig = {
+        owner,
+        repo: repoName,
+        label: repoLabel,
+        botUsers: [],
+        localPath,
+        skipTypecheck,
+      };
+      const progressOutput: string[] = [];
+      const results = await fixComments({
+        fixerAgent,
+        repo: repoConfig,
+        branch,
+        prNumber,
+        prTitle,
+        comments: botComments,
+        commentStates,
+        onDebug: (debugDetail) => {
+          progressOutput.push(`[debug] ${JSON.stringify(debugDetail)}`);
+        },
+        onHistoryUpdate: (history) => {
+          if (history.currentStep) {
+            progressOutput.push(`[history] ${history.currentStep}${history.detail ? ` · ${history.detail}` : ""}`);
+          } else if (history.detail) {
+            progressOutput.push(`[history] ${history.detail}`);
+          }
+          const lastLine = history.output[history.output.length - 1];
+          if (lastLine) {
+            progressOutput.push(lastLine);
+          }
+        },
+      });
+
+      await client.mutation(api.githubComments.finalizeFixResults, {
+        machineToken: session.machineToken,
+        repoId,
+        prNumber,
+        fixerAgent,
+        results: results
+          .map((result) => {
+            const commentId = commentIdMap.get(result.commentId);
+            if (!commentId) {
+              return null;
+            }
+
+            return {
+              commentId,
+              filesChanged: result.filesChanged,
+              commitHash: result.commitHash,
+              commitMessage: result.commitMessage,
+              fixedAt: result.fixedAt,
+            };
+          })
+          .filter((result): result is NonNullable<typeof result> => result !== null),
+      });
+
+      return {
+        output: [
+          `[fix_comments] completed at ${now}`,
+          `[fix_comments] repo=${repoLabel}`,
+          "[fix_comments] source=github_comments",
+          `[fix_comments] fixer=${fixerAgent}`,
+          `[fix_comments] fixed=${results.length}`,
+          ...progressOutput.slice(-12),
+        ],
+        steps: [
+          {
+            step: "load_fixable_github_comments",
+            detail: `${fixableComments.length} actionable GitHub comment(s)`,
+            status: "done" as const,
+            ts: now,
+          },
+          {
+            step: "run_github_comment_fixer",
+            detail: fixerAgent,
+            status: "done" as const,
+            ts: now,
+          },
+          {
+            step: "persist_github_fix_results",
+            detail: `Stored ${results.length} GitHub comment fix result(s) in Convex`,
+            status: "done" as const,
+            ts: now,
+          },
+        ],
+      };
+    }
 
     if (
       source !== "local_review_comments" ||
@@ -1244,6 +1579,94 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
         {
           step: "persist_publish_state",
           detail: `Marked ${bundle.comments.length} comment(s) as published`,
+          status: "done" as const,
+          ts: now,
+        },
+      ],
+    };
+  }
+
+  if (job.kind === "reply_comment") {
+    const source = typeof payload?.source === "string" ? payload.source : null;
+    const repoId = typeof payload?.repoId === "string" ? (payload.repoId as Id<"repos">) : null;
+    const repoLabel = typeof payload?.repoLabel === "string" ? payload.repoLabel : null;
+    const prNumber = typeof payload?.prNumber === "number" ? payload.prNumber : null;
+
+    if (source !== "github_comments" || !repoId || !repoLabel || !prNumber) {
+      throw new Error("reply_comment payload is missing repo or reply context.");
+    }
+
+    const capabilities = detectCapabilities();
+    if (!capabilities.gh) {
+      throw new Error("GitHub CLI is not available on this machine.");
+    }
+
+    const replyableComments = await client.query(api.githubComments.listReplyableForMachine, {
+      machineToken: session.machineToken,
+      repoId,
+      prNumber,
+    });
+
+    if (replyableComments.length === 0) {
+      return {
+        output: [
+          `[reply_comment] completed at ${now}`,
+          `[reply_comment] repo=${repoLabel}`,
+          "[reply_comment] source=github_comments",
+          "[reply_comment] no fixed inline comments are ready for replies",
+        ],
+        steps: [
+          {
+            step: "load_replyable_comments",
+            detail: "No fixed inline comments are ready for replies",
+            status: "done" as const,
+            ts: now,
+          },
+        ],
+      };
+    }
+
+    const replies: Array<{ commentId: Id<"githubComments">; body: string; repliedAt: string }> = [];
+    for (const comment of replyableComments) {
+      const body = `Addressed in ${comment.fixCommitHash}`;
+      await replyToReviewComment(repoLabel, prNumber, comment.githubCommentId, body);
+      replies.push({
+        commentId: comment._id,
+        body,
+        repliedAt: now,
+      });
+    }
+
+    await client.mutation(api.githubComments.markReplied, {
+      machineToken: session.machineToken,
+      repoId,
+      prNumber,
+      replies,
+    });
+
+    return {
+      output: [
+        `[reply_comment] completed at ${now}`,
+        `[reply_comment] repo=${repoLabel}`,
+        "[reply_comment] source=github_comments",
+        `[reply_comment] replied=${replies.length}`,
+      ],
+      steps: [
+        {
+          step: "load_replyable_comments",
+          detail: `${replyableComments.length} fixed inline comment(s)`,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "send_github_replies",
+          detail: `Posted ${replies.length} reply(s) via gh`,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "persist_reply_state",
+          detail: `Marked ${replies.length} reply result(s) in Convex`,
           status: "done" as const,
           ts: now,
         },

@@ -31,6 +31,12 @@ function timelineLabel(eventType: string) {
   if (eventType === "comments_fetched") return "GitHub snapshot updated";
   if (eventType === "analysis_requested") return "Review comment analysis requested";
   if (eventType === "analysis_failed") return "Review comment analysis failed";
+  if (eventType === "fix_started") return "GitHub comment fix requested";
+  if (eventType === "fix_completed") return "GitHub comment fix completed";
+  if (eventType === "fix_failed") return "GitHub comment fix failed";
+  if (eventType === "fix_no_changes") return "GitHub comment fix made no changes";
+  if (eventType === "comments_replied") return "Replies posted";
+  if (eventType === "comments_reply_failed") return "Reply posting failed";
   if (eventType === "review_publish_requested") return "Review publish requested";
   if (eventType === "review_publish_failed") return "Review publish failed";
   if (eventType === "local_fix_started") return "Local fix requested";
@@ -43,6 +49,9 @@ function timelineLabel(eventType: string) {
 export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const { activeWorkspaceId } = useActiveWorkspace();
   const enqueuePrRefresh = useMutation(api.jobs.enqueuePrRefresh);
+  const enqueueGithubCommentAnalysis = useMutation(api.jobs.enqueueGithubCommentAnalysis);
+  const enqueueGithubCommentFix = useMutation(api.jobs.enqueueGithubCommentFix);
+  const enqueueGithubCommentReply = useMutation(api.jobs.enqueueGithubCommentReply);
   const enqueueReviewRequest = useMutation(api.jobs.enqueueReviewRequest);
   const enqueueReviewCommentAnalysis = useMutation(api.jobs.enqueueReviewCommentAnalysis);
   const enqueueReviewCommentFix = useMutation(api.jobs.enqueueReviewCommentFix);
@@ -76,6 +85,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [fixError, setFixError] = useState<string | null>(null);
+  const [replyError, setReplyError] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
 
   const repoMachineConfigs = useMemo(
@@ -140,6 +150,39 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     }
     return counts;
   }, [reviewComments]);
+  const botUsers = detail?.repoBotUsers ?? [];
+  const githubComments = detail?.comments ?? [];
+  const pendingGithubCommentCount = useMemo(
+    () =>
+      githubComments.filter(
+        (comment) =>
+          botUsers.includes(comment.user) &&
+          (comment.status === "new" || comment.status === "analyzing"),
+      ).length,
+    [botUsers, githubComments],
+  );
+  const fixableGithubCommentCount = useMemo(
+    () =>
+      githubComments.filter(
+        (comment) =>
+          botUsers.includes(comment.user) &&
+          (comment.status === "analyzed" || comment.status === "fix_failed") &&
+          (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX"),
+      ).length,
+    [botUsers, githubComments],
+  );
+  const replyableGithubCommentCount = useMemo(
+    () =>
+      githubComments.filter(
+        (comment) =>
+          botUsers.includes(comment.user) &&
+          comment.type === "inline" &&
+          comment.status === "fixed" &&
+          !comment.repliedAt &&
+          !!comment.fixCommitHash,
+      ).length,
+    [botUsers, githubComments],
+  );
 
   if (!activeWorkspaceId || detail === undefined) {
     return (
@@ -223,6 +266,25 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     }
   };
 
+  const handleAnalyzeGithubComments = async (analyzerAgent: "claude" | "codex") => {
+    if (!activeWorkspaceId || !selectedMachineSlug) {
+      return;
+    }
+
+    try {
+      setAnalysisError(null);
+      await enqueueGithubCommentAnalysis({
+        workspaceId: activeWorkspaceId,
+        repoLabel: repo,
+        prNumber,
+        machineSlug: selectedMachineSlug,
+        analyzerAgent,
+      });
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const handleFixReviewComments = async (
     reviewerId: "claude" | "codex",
     fixerAgent: "claude" | "codex",
@@ -243,6 +305,43 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       });
     } catch (error) {
       setFixError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleFixGithubComments = async (fixerAgent: "claude" | "codex") => {
+    if (!activeWorkspaceId || !selectedMachineSlug) {
+      return;
+    }
+
+    try {
+      setFixError(null);
+      await enqueueGithubCommentFix({
+        workspaceId: activeWorkspaceId,
+        repoLabel: repo,
+        prNumber,
+        machineSlug: selectedMachineSlug,
+        fixerAgent,
+      });
+    } catch (error) {
+      setFixError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleReplyToGithubComments = async () => {
+    if (!activeWorkspaceId || !selectedMachineSlug) {
+      return;
+    }
+
+    try {
+      setReplyError(null);
+      await enqueueGithubCommentReply({
+        workspaceId: activeWorkspaceId,
+        repoLabel: repo,
+        prNumber,
+        machineSlug: selectedMachineSlug,
+      });
+    } catch (error) {
+      setReplyError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -406,6 +505,11 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   {fixError}
                 </div>
               ) : null}
+              {replyError ? (
+                <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {replyError}
+                </div>
+              ) : null}
               {publishError ? (
                 <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                   {publishError}
@@ -418,17 +522,120 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 </div>
               ) : (
                 <div className="mt-3 space-y-3">
+                  {selectedMachineRecord ? (
+                    <div className="flex flex-wrap gap-2 rounded-xl border border-white/8 bg-black/10 px-3 py-3">
+                      <span className="text-xs text-muted-foreground">
+                        {pendingGithubCommentCount > 0 ? `${pendingGithubCommentCount} pending triage` : "No pending triage"}
+                        {fixableGithubCommentCount > 0 ? ` · ${fixableGithubCommentCount} ready to fix` : ""}
+                        {replyableGithubCommentCount > 0 ? ` · ${replyableGithubCommentCount} ready to reply` : ""}
+                      </span>
+                      {pendingGithubCommentCount > 0 && selectedMachineRecord.capabilities.claude ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleAnalyzeGithubComments("claude")}
+                        >
+                          Triage with Claude
+                        </Button>
+                      ) : null}
+                      {pendingGithubCommentCount > 0 && selectedMachineRecord.capabilities.codex ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleAnalyzeGithubComments("codex")}
+                        >
+                          Triage with Codex
+                        </Button>
+                      ) : null}
+                      {fixableGithubCommentCount > 0 && selectedMachineRecord.capabilities.claude ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleFixGithubComments("claude")}
+                        >
+                          Fix with Claude
+                        </Button>
+                      ) : null}
+                      {fixableGithubCommentCount > 0 && selectedMachineRecord.capabilities.codex ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleFixGithubComments("codex")}
+                        >
+                          Fix with Codex
+                        </Button>
+                      ) : null}
+                      {replyableGithubCommentCount > 0 && selectedMachineRecord.capabilities.gh ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleReplyToGithubComments()}
+                        >
+                          Reply addressed
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {comments.map((comment) => (
                     <Card key={comment._id} className="border-white/8 bg-zinc-900/55 p-4">
+                      {(() => {
+                        const isBotComment = botUsers.includes(comment.user);
+                        return (
+                          <>
                       <div className="flex flex-wrap items-center gap-2">
                         <CommentTypeBadge type={comment.type} />
                         <Badge variant="outline">{comment.user}</Badge>
                         {comment.path ? <Badge variant="outline">{comment.path}{comment.line ? `:${comment.line}` : ""}</Badge> : null}
+                        {isBotComment ? <Badge variant="outline">{comment.status}</Badge> : null}
+                        {isBotComment && comment.analysisCategory ? <Badge variant="outline">{comment.analysisCategory}</Badge> : null}
                         <span className="text-xs text-muted-foreground">{formatTimestamp(comment.updatedAt)}</span>
                       </div>
                       <div className="mt-3 text-sm leading-6 text-foreground/88">
                         <MarkdownBody text={comment.body} />
                       </div>
+                      {isBotComment && comment.analysisReasoning ? (
+                        <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-100/90">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
+                            Triage Reasoning
+                          </p>
+                          <p className="mt-2 whitespace-pre-wrap text-sm leading-6">
+                            {comment.analysisReasoning}
+                          </p>
+                        </div>
+                      ) : null}
+                      {isBotComment && comment.fixCommitHash ? (
+                        <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
+                            Fix Result
+                          </p>
+                          <p className="mt-2 text-sm leading-6">
+                            Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
+                            {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
+                          </p>
+                          {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
+                            <p className="mt-1 text-xs text-sky-100/80">
+                              {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
+                              {comment.fixFilesChanged.length > 4 ? "..." : ""}
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {isBotComment && comment.repliedAt ? (
+                        <div className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-sm text-violet-100/90">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">
+                            Reply Posted
+                          </p>
+                          <p className="mt-2 text-sm leading-6">
+                            Replied on {formatTimestamp(comment.repliedAt)}
+                          </p>
+                          {comment.replyBody ? (
+                            <p className="mt-1 text-xs text-violet-100/80">{comment.replyBody}</p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                          </>
+                        );
+                      })()}
                     </Card>
                   ))}
                 </div>

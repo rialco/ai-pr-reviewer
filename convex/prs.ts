@@ -132,6 +132,15 @@ async function upsertPrSnapshot(
       line: incomingComment.line,
       diffHunk: incomingComment.diffHunk,
       status: normalizeCommentStatus(existingComment?.status),
+      analysisCategory: existingComment?.analysisCategory,
+      analysisReasoning: existingComment?.analysisReasoning,
+      analysisDetails: existingComment?.analysisDetails,
+      fixCommitHash: existingComment?.fixCommitHash,
+      fixCommitMessage: existingComment?.fixCommitMessage,
+      fixFilesChanged: existingComment?.fixFilesChanged,
+      fixFixedAt: existingComment?.fixFixedAt,
+      repliedAt: existingComment?.repliedAt,
+      replyBody: existingComment?.replyBody,
       githubUrl: incomingComment.githubUrl,
       createdAt: incomingComment.createdAt,
       updatedAt: incomingComment.updatedAt,
@@ -238,6 +247,7 @@ export const getDetailForWorkspace = query({
       .collect();
 
     return {
+      repoBotUsers: repo.botUsers,
       pr: {
         ...pr,
         body: pr.body ?? "",

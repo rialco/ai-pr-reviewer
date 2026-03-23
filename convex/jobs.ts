@@ -366,6 +366,112 @@ export const enqueuePrRefresh = mutation({
   },
 });
 
+export const enqueueGithubCommentAnalysis = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    repoLabel: v.string(),
+    prNumber: v.number(),
+    machineSlug: v.string(),
+    analyzerAgent: v.union(v.literal("claude"), v.literal("codex")),
+  },
+  handler: async (ctx, args) => {
+    const { user } = await requireWorkspaceAccess(ctx, args.workspaceId);
+    const repo = await ctx.db
+      .query("repos")
+      .withIndex("by_workspaceId_label", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("label", args.repoLabel),
+      )
+      .unique();
+
+    if (!repo || repo.archivedAt) {
+      throw new Error("Repo not found.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const machineConfig = await ctx.db
+      .query("repoMachineConfigs")
+      .withIndex("by_repoId_machineSlug", (q) =>
+        q.eq("repoId", repo._id).eq("machineSlug", args.machineSlug),
+      )
+      .unique();
+
+    if (!machineConfig) {
+      throw new Error("No checkout is registered for this repo on that machine.");
+    }
+
+    const now = nowIso();
+    const githubComments = await ctx.db
+      .query("githubComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+    const pendingComments = githubComments.filter(
+      (comment) =>
+        repo.botUsers.includes(comment.user) &&
+        (comment.status === undefined || comment.status === "new" || comment.status === "analyzing"),
+    );
+
+    if (pendingComments.length === 0) {
+      throw new Error("No pending GitHub review comments are available to analyze.");
+    }
+
+    for (const comment of pendingComments) {
+      await ctx.db.patch(comment._id, {
+        status: "analyzing",
+        updatedAt: now,
+      });
+    }
+
+    const jobId = await ctx.db.insert("jobs", {
+      workspaceId: args.workspaceId,
+      repoId: repo._id,
+      prId: pr._id,
+      createdByUserId: user._id,
+      kind: "analyze_comments",
+      status: "queued",
+      targetMachineSlug: args.machineSlug,
+      title: `Analyze ${repo.label} #${pr.prNumber} GitHub comments with ${args.analyzerAgent}`,
+      payload: {
+        source: "github_comments",
+        repoId: repo._id,
+        prId: pr._id,
+        repoLabel: repo.label,
+        owner: repo.owner,
+        repo: repo.repo,
+        prNumber: pr.prNumber,
+        prTitle: pr.title,
+        branch: pr.headRefName,
+        localPath: machineConfig.localPath,
+        analyzerAgent: args.analyzerAgent,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("timelineEvents", {
+      workspaceId: args.workspaceId,
+      prId: pr._id,
+      eventType: "analysis_requested",
+      detail: {
+        analyzerAgent: args.analyzerAgent,
+        machineSlug: args.machineSlug,
+        count: pendingComments.length,
+        source: "github_comments",
+      },
+      createdAt: now,
+    });
+
+    return await ctx.db.get(jobId);
+  },
+});
+
 export const enqueueReviewRequest = mutation({
   args: {
     workspaceId: v.id("workspaces"),
@@ -558,6 +664,185 @@ export const enqueueReviewCommentAnalysis = mutation({
         source: "local_review_comments",
       },
       createdAt: now,
+    });
+
+    return await ctx.db.get(jobId);
+  },
+});
+
+export const enqueueGithubCommentFix = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    repoLabel: v.string(),
+    prNumber: v.number(),
+    machineSlug: v.string(),
+    fixerAgent: v.union(v.literal("claude"), v.literal("codex")),
+  },
+  handler: async (ctx, args) => {
+    const { user } = await requireWorkspaceAccess(ctx, args.workspaceId);
+    const repo = await ctx.db
+      .query("repos")
+      .withIndex("by_workspaceId_label", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("label", args.repoLabel),
+      )
+      .unique();
+
+    if (!repo || repo.archivedAt) {
+      throw new Error("Repo not found.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const machineConfig = await ctx.db
+      .query("repoMachineConfigs")
+      .withIndex("by_repoId_machineSlug", (q) =>
+        q.eq("repoId", repo._id).eq("machineSlug", args.machineSlug),
+      )
+      .unique();
+
+    if (!machineConfig) {
+      throw new Error("No checkout is registered for this repo on that machine.");
+    }
+
+    const now = nowIso();
+    const githubComments = await ctx.db
+      .query("githubComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+    const fixableComments = githubComments.filter(
+      (comment) =>
+        repo.botUsers.includes(comment.user) &&
+        (comment.status === "analyzed" || comment.status === "fix_failed") &&
+        (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX"),
+    );
+
+    if (fixableComments.length === 0) {
+      throw new Error("No actionable GitHub review comments are available to fix.");
+    }
+
+    for (const comment of fixableComments) {
+      await ctx.db.patch(comment._id, {
+        status: "fixing",
+        updatedAt: now,
+      });
+    }
+
+    const jobId = await ctx.db.insert("jobs", {
+      workspaceId: args.workspaceId,
+      repoId: repo._id,
+      prId: pr._id,
+      createdByUserId: user._id,
+      kind: "fix_comments",
+      status: "queued",
+      targetMachineSlug: args.machineSlug,
+      title: `Fix ${repo.label} #${pr.prNumber} GitHub comments with ${args.fixerAgent}`,
+      payload: {
+        source: "github_comments",
+        repoId: repo._id,
+        prId: pr._id,
+        repoLabel: repo.label,
+        owner: repo.owner,
+        repo: repo.repo,
+        prNumber: pr.prNumber,
+        prTitle: pr.title,
+        branch: pr.headRefName,
+        localPath: machineConfig.localPath,
+        skipTypecheck: machineConfig.skipTypecheck,
+        fixerAgent: args.fixerAgent,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("timelineEvents", {
+      workspaceId: args.workspaceId,
+      prId: pr._id,
+      eventType: "fix_started",
+      detail: {
+        fixerAgent: args.fixerAgent,
+        machineSlug: args.machineSlug,
+        commentCount: fixableComments.length,
+        source: "github_comments",
+      },
+      createdAt: now,
+    });
+
+    return await ctx.db.get(jobId);
+  },
+});
+
+export const enqueueGithubCommentReply = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    repoLabel: v.string(),
+    prNumber: v.number(),
+    machineSlug: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { user } = await requireWorkspaceAccess(ctx, args.workspaceId);
+    const repo = await ctx.db
+      .query("repos")
+      .withIndex("by_workspaceId_label", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("label", args.repoLabel),
+      )
+      .unique();
+
+    if (!repo || repo.archivedAt) {
+      throw new Error("Repo not found.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const githubComments = await ctx.db
+      .query("githubComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+    const replyableComments = githubComments.filter(
+      (comment) =>
+        repo.botUsers.includes(comment.user) &&
+        comment.type === "inline" &&
+        comment.status === "fixed" &&
+        !comment.repliedAt &&
+        !!comment.fixCommitHash,
+    );
+
+    if (replyableComments.length === 0) {
+      throw new Error("No fixed GitHub inline comments are ready for replies.");
+    }
+
+    const now = nowIso();
+    const jobId = await ctx.db.insert("jobs", {
+      workspaceId: args.workspaceId,
+      repoId: repo._id,
+      prId: pr._id,
+      createdByUserId: user._id,
+      kind: "reply_comment",
+      status: "queued",
+      targetMachineSlug: args.machineSlug,
+      title: `Reply to ${repo.label} #${pr.prNumber} addressed comments`,
+      payload: {
+        source: "github_comments",
+        repoId: repo._id,
+        prId: pr._id,
+        repoLabel: repo.label,
+        prNumber: pr.prNumber,
+      },
+      createdAt: now,
+      updatedAt: now,
     });
 
     return await ctx.db.get(jobId);
@@ -1111,6 +1396,20 @@ export const failMachineJob = mutation({
           }
         }
       }
+      if (typeof payload?.source === "string" && payload.source === "github_comments") {
+        const githubComments = await ctx.db
+          .query("githubComments")
+          .withIndex("by_prId", (q) => q.eq("prId", job.prId!))
+          .collect();
+        for (const comment of githubComments) {
+          if (comment.status === "analyzing") {
+            await ctx.db.patch(comment._id, {
+              status: "new",
+              updatedAt: now,
+            });
+          }
+        }
+      }
       await ctx.db.insert("timelineEvents", {
         workspaceId: job.workspaceId,
         prId: job.prId,
@@ -1154,6 +1453,33 @@ export const failMachineJob = mutation({
           }
         }
       }
+      if (typeof payload?.source === "string" && payload.source === "github_comments") {
+        const githubComments = await ctx.db
+          .query("githubComments")
+          .withIndex("by_prId", (q) => q.eq("prId", job.prId!))
+          .collect();
+        for (const comment of githubComments) {
+          if (comment.status === "fixing") {
+            await ctx.db.patch(comment._id, {
+              status: "fix_failed",
+              updatedAt: now,
+            });
+          }
+        }
+        await ctx.db.insert("timelineEvents", {
+          workspaceId: job.workspaceId,
+          prId: job.prId,
+          eventType: "fix_failed",
+          detail: {
+            fixerAgent: typeof payload?.fixerAgent === "string" ? payload.fixerAgent : null,
+            source: typeof payload?.source === "string" ? payload.source : null,
+            machineSlug: machine.slug,
+            jobId: job._id,
+            errorMessage: args.errorMessage,
+          },
+          createdAt: now,
+        });
+      }
       await ctx.db.insert("timelineEvents", {
         workspaceId: job.workspaceId,
         prId: job.prId,
@@ -1161,6 +1487,25 @@ export const failMachineJob = mutation({
         detail: {
           reviewerId: typeof payload?.reviewerId === "string" ? payload.reviewerId : null,
           fixerAgent: typeof payload?.fixerAgent === "string" ? payload.fixerAgent : null,
+          source: typeof payload?.source === "string" ? payload.source : null,
+          machineSlug: machine.slug,
+          jobId: job._id,
+          errorMessage: args.errorMessage,
+        },
+        createdAt: now,
+      });
+    }
+
+    if (job.kind === "reply_comment" && job.prId) {
+      const payload =
+        job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
+          ? (job.payload as Record<string, unknown>)
+          : null;
+      await ctx.db.insert("timelineEvents", {
+        workspaceId: job.workspaceId,
+        prId: job.prId,
+        eventType: "comments_reply_failed",
+        detail: {
           source: typeof payload?.source === "string" ? payload.source : null,
           machineSlug: machine.slug,
           jobId: job._id,
