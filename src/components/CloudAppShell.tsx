@@ -66,6 +66,12 @@ function CloudStatusCard() {
     activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
   );
 
+  useEffect(() => {
+    if (!selectedMachineSlug && machines?.[0]?.slug) {
+      setSelectedMachineSlug(machines[0].slug);
+    }
+  }, [machines, selectedMachineSlug]);
+
   if (!viewer || !viewer.user) {
     return null;
   }
@@ -87,12 +93,6 @@ function CloudStatusCard() {
         "pnpm dev:worker",
       ].join(" \\\n  ")
     : null;
-
-  useEffect(() => {
-    if (!selectedMachineSlug && machines?.[0]?.slug) {
-      setSelectedMachineSlug(machines[0].slug);
-    }
-  }, [machines, selectedMachineSlug]);
 
   const handleCreateToken = async () => {
     if (!activeWorkspaceId) return;
