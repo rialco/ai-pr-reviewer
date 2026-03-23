@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "convex/react";
-import { useCoordinatorPRPreference, useOpenPRs, usePRStatus, useUpdateCoordinatorPRPreference } from "../hooks/useApi";
 import { Badge } from "./ui/badge";
-import { AgentLogo, getAgentLabel } from "./ui/agent-logo";
-import { Switch } from "./ui/switch";
 import { api } from "../../convex/_generated/api";
+import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
 import { cn } from "@/lib/utils";
 import { GitPullRequest, ExternalLink, ChevronDown, ChevronRight } from "lucide-react";
 
@@ -21,87 +19,6 @@ const phaseColor: Record<string, string> = {
 
 function getRepoDisplayName(repo: string) {
   return repo.split("/").pop() ?? repo;
-}
-
-function PRStatusIndicator({ repo, prNumber }: { repo: string; prNumber: number }) {
-  const { data: status } = usePRStatus(repo, prNumber);
-  const scores = status?.reviewScores ?? {};
-  const hasScores = Object.values(scores).some((s) => s !== null);
-
-  if (!status || (status.phase === "polled" && status.reviewCycle === 0 && !hasScores)) {
-    return null;
-  }
-
-  return (
-    <div className="flex items-center justify-between mt-1">
-      <div className="flex items-center gap-1.5">
-        {Object.entries(scores).map(([reviewerId, score]) =>
-          score !== null ? (
-            <span key={reviewerId} title={getAgentLabel(reviewerId)}>
-              <Badge
-                variant={score >= 4 ? "confidence_high" : score >= 3 ? "confidence_low" : "confidence_danger"}
-                className="gap-1 text-[10px] px-1 py-0"
-              >
-                <AgentLogo agent={reviewerId} className="h-2.5 w-2.5 shrink-0" />
-                {score}/5
-              </Badge>
-            </span>
-          ) : null,
-        )}
-      </div>
-      <div className="flex items-center gap-1.5">
-        {status.phase !== "polled" && (
-          <span
-            className={`h-2 w-2 rounded-full ${phaseColor[status.phase] ?? "bg-muted-foreground"}`}
-            title={status.phase}
-          />
-        )}
-        {status.reviewCycle > 0 && (
-          <span className="text-[10px] text-muted-foreground">
-            C{status.reviewCycle}
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function CoordinatorChecklistToggle({
-  repo,
-  prNumber,
-}: {
-  repo: string;
-  prNumber: number;
-}) {
-  const { data: preference } = useCoordinatorPRPreference(repo, prNumber);
-  const updatePreference = useUpdateCoordinatorPRPreference();
-  const checklistEnabled = !(preference?.ignored ?? false);
-
-  return (
-    <div className="flex items-center gap-2">
-      <span className={cn(
-        "text-[10px] uppercase tracking-[0.18em]",
-        checklistEnabled ? "text-muted-foreground/70" : "text-amber-400/80",
-      )}>
-        {checklistEnabled ? "Auto" : "Off"}
-      </span>
-      <Switch
-        size="sm"
-        checked={checklistEnabled}
-        disabled={updatePreference.isPending}
-        aria-label={checklistEnabled ? "Remove PR from coordinator checklist" : "Return PR to coordinator checklist"}
-        title={checklistEnabled ? "Turn coordinator checklist off for this PR" : "Turn coordinator checklist back on for this PR"}
-        onClick={(event) => {
-          event.stopPropagation();
-          updatePreference.mutate({
-            repo,
-            prNumber,
-            ignored: checklistEnabled,
-          });
-        }}
-      />
-    </div>
-  );
 }
 
 function RepoSection({
@@ -166,123 +83,8 @@ interface PRListProps {
   selectedPR: { repo: string; prNumber: number } | null;
 }
 
-function LocalPRList({ onSelectPR, selectedPR }: PRListProps) {
-  const { data: prs, isLoading } = useOpenPRs();
-  const [collapsedRepos, setCollapsedRepos] = useState<Record<string, boolean>>({});
-  const repoEntries = useMemo(() => {
-    const byRepo = new Map<string, NonNullable<typeof prs>>();
-    for (const pr of prs ?? []) {
-      if (!byRepo.has(pr.repo)) byRepo.set(pr.repo, []);
-      byRepo.get(pr.repo)!.push(pr);
-    }
-    return Array.from(byRepo.entries());
-  }, [prs]);
-
-  useEffect(() => {
-    if (!selectedPR) return;
-    setCollapsedRepos((current) => {
-      if (!current[selectedPR.repo]) return current;
-      return { ...current, [selectedPR.repo]: false };
-    });
-  }, [selectedPR]);
-
-  if (isLoading) {
-    return <div className="text-sm text-muted-foreground p-4">Loading PRs...</div>;
-  }
-
-  if (!prs?.length) {
-    return (
-      <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-        <GitPullRequest className="h-8 w-8 mb-3 opacity-40" />
-        <p className="text-sm">No open PRs</p>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      {repoEntries.map(([repo, repoPRs]) => {
-        const repoSelected = selectedPR?.repo === repo;
-        const collapsed = collapsedRepos[repo] ?? false;
-
-        return (
-          <RepoSection
-            key={repo}
-            repo={repo}
-            count={repoPRs.length}
-            selected={repoSelected}
-            collapsed={collapsed}
-            onToggle={() =>
-              setCollapsedRepos((current) => ({
-                ...current,
-                [repo]: !(current[repo] ?? false),
-              }))
-            }
-          >
-            <div className="space-y-2">
-              {repoPRs.map((pr) => {
-                const isSelected =
-                  selectedPR?.repo === pr.repo &&
-                  selectedPR?.prNumber === pr.number;
-
-                return (
-                  <div
-                    key={`${pr.repo}-${pr.number}`}
-                    className={cn(
-                      "group flex items-start gap-3 rounded-xl border px-3 py-3 transition-all duration-150",
-                      isSelected
-                        ? "border-primary/30 bg-primary/10 opacity-100"
-                        : "border-transparent opacity-70 hover:border-border/70 hover:bg-muted/20 hover:opacity-100",
-                    )}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => onSelectPR(pr.repo, pr.number)}
-                      className="min-w-0 flex-1 text-left"
-                    >
-                      <div className="min-w-0">
-                        <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
-                          <Badge
-                            variant="outline"
-                            className="row-span-2 min-h-11 items-center self-stretch px-2.5 text-sm font-semibold"
-                          >
-                            #{pr.number}
-                          </Badge>
-                          <p className="truncate text-sm font-medium">{pr.title}</p>
-                          <span className="truncate text-xs text-muted-foreground/90">
-                            {pr.headRefName}
-                          </span>
-                        </div>
-                        <PRStatusIndicator repo={pr.repo} prNumber={pr.number} />
-                      </div>
-                    </button>
-                    <div className="flex shrink-0 flex-col items-end gap-2 pt-0.5">
-                      <CoordinatorChecklistToggle repo={pr.repo} prNumber={pr.number} />
-                      <a
-                        href={pr.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        onClick={(e) => e.stopPropagation()}
-                        className="p-1 text-muted-foreground transition-colors hover:text-foreground"
-                        title="Open pull request on GitHub"
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                      </a>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </RepoSection>
-        );
-      })}
-    </div>
-  );
-}
-
-function CloudPRList({ onSelectPR, selectedPR }: PRListProps) {
-  const workspaces = useQuery(api.workspaces.listForCurrentUser);
-  const activeWorkspaceId = workspaces?.[0]?._id;
+export function PRList({ onSelectPR, selectedPR }: PRListProps) {
+  const { activeWorkspaceId } = useActiveWorkspace();
   const prs = useQuery(
     api.prs.listForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
@@ -404,8 +206,4 @@ function CloudPRList({ onSelectPR, selectedPR }: PRListProps) {
       })}
     </div>
   );
-}
-
-export function PRList(props: PRListProps) {
-  return <CloudPRList {...props} />;
 }
