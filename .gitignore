@@ -5,4 +5,9 @@ data/config.json
 data/*.db
 data/*.db-shm
 data/*.db-wal
+.env*
+!.env.example
+!.env.sample
+.claude/settings.local.json
+.worktrees/
 .DS_Store

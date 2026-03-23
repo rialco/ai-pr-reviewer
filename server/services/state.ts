@@ -53,6 +53,7 @@ export function addRepo(owner: string, repo: string): RepoConfig {
     repo,
     label,
     botUsers: [...DEFAULT_BOT_USERS],
+    skipTypecheck: false,
   };
   state.repos.push(config);
   saveState(state);
@@ -142,6 +143,9 @@ export function updateRepoLocalPath(label: string, localPath: string | null): Re
     repo.localPath = localPath;
   } else {
     delete repo.localPath;
+  }
+  if (repo.skipTypecheck === undefined) {
+    repo.skipTypecheck = false;
   }
   saveState(state);
   return repo;

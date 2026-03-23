@@ -17,6 +17,7 @@ export interface RepoConfig {
   label: string;
   botUsers: string[];
   localPath?: string;
+  skipTypecheck?: boolean;
 }
 
 export interface PRInfo {
@@ -24,6 +25,9 @@ export interface PRInfo {
   title: string;
   url: string;
   headRefName: string;
+  baseRefName: string;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | null;
+  mergeStateStatus: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
   author: string;
   repo: string;
   createdAt: string;
@@ -43,6 +47,10 @@ export interface PROverview {
   url: string;
   headRefName: string;
   baseRefName: string;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | null;
+  mergeStateStatus: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
+  needsConflictResolution: boolean;
+  blockedReason: string | null;
   author: string;
   createdAt: string;
   updatedAt: string;
@@ -126,11 +134,17 @@ export interface TimelineRunHistory {
 }
 
 export interface PRStatus {
-  phase: "polled" | "analyzed" | "fixing" | "fixed" | "merge_ready" | "re_review_requested" | "waiting_for_review";
+  phase: "polled" | "blocked" | "analyzed" | "fixing" | "fixed" | "merge_ready" | "re_review_requested" | "waiting_for_review";
   reviewCycle: number;
   reviewScores: Record<string, number | null>;
   lastFixedAt: string | null;
   lastReReviewAt: string | null;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | null;
+  mergeStateStatus: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
+  headRefName: string | null;
+  baseRefName: string | null;
+  needsConflictResolution: boolean;
+  blockedReason: string | null;
   fixResults: Array<{
     commentId: number;
     filesChanged: string[];
@@ -612,6 +626,7 @@ export interface SuggestedNextStep {
   action:
     | "ignored"
     | "busy"
+    | "resolve_merge_conflict"
     | "merge_ready"
     | "analyze_github"
     | "analyze_local"
@@ -767,10 +782,13 @@ export function useBrowse(dirPath: string) {
 export function useUpdateRepo() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { label: string; localPath: string | null }) =>
+    mutationFn: (data: { label: string; localPath?: string | null; skipTypecheck?: boolean }) =>
       fetchJson<RepoConfig>(`/api/repos/${encodeURIComponent(data.label)}`, {
         method: "PATCH",
-        body: JSON.stringify({ localPath: data.localPath }),
+        body: JSON.stringify({
+          ...(data.localPath !== undefined ? { localPath: data.localPath } : {}),
+          ...(data.skipTypecheck !== undefined ? { skipTypecheck: data.skipTypecheck } : {}),
+        }),
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["repos"] }),
   });

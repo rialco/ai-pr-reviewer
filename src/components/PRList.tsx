@@ -8,6 +8,7 @@ import { GitPullRequest, ExternalLink, ChevronDown, ChevronRight } from "lucide-
 
 const phaseColor: Record<string, string> = {
   polled: "bg-muted-foreground",
+  blocked: "bg-amber-400",
   analyzed: "bg-primary",
   fixing: "bg-fixing",
   fixed: "bg-fixed",

@@ -6,6 +6,7 @@ import os from "os";
 import path from "path";
 import type { ReviewerPort, PRContext } from "../../domain/review/ReviewerPort.js";
 import type { Review, ReviewProgress, ReviewerId } from "../../domain/review/types.js";
+import { fetchOrigin } from "../../services/git.js";
 import { getPRDiff } from "../../services/github.js";
 import {
   getCurrentReviewCommentsByReviewer,
@@ -64,7 +65,7 @@ export class CodexReviewer implements ReviewerPort {
         progress: 20,
       });
       try {
-        await execAsync("git fetch origin", { cwd: pr.localPath, timeout: 60000 });
+        await fetchOrigin(pr.localPath);
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-review-codex-"));
         await execAsync(`git worktree add ${tmpDir} origin/${pr.branch}`, {
           cwd: pr.localPath,

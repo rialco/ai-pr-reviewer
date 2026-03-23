@@ -6,18 +6,21 @@ import {
   getRepos,
   getSettings,
   getCoordinatorPRPreference,
+  getPRState,
+  syncPRStateMetadata,
 } from "./db.js";
 import { getAllJobs, markScheduledEventRan, registerScheduledEvent, startJob, updateJobStep, completeJob, failJob } from "./jobs.js";
-import { listOpenPRs } from "./github.js";
+import { describeMergeBlockage, listOpenPRs, needsConflictResolution } from "./github.js";
 import { getReviewService } from "../infrastructure/reviewers/registry.js";
 import { isAnalyzerAgentAvailable, type AnalyzerAgent } from "./analyzer.js";
 import { isFixerAgentAvailable } from "./fixer.js";
 import type { Review } from "../domain/review/types.js";
-import type { AppSettings } from "../types.js";
+import type { AppSettings, PRInfo } from "../types.js";
 
 export type WorkflowAction =
   | "ignored"
   | "busy"
+  | "resolve_merge_conflict"
   | "merge_ready"
   | "analyze_github"
   | "analyze_local"
@@ -45,6 +48,7 @@ const INTERNAL_API_BASE = process.env.PR_REVIEWER_INTERNAL_BASE_URL ?? "http://1
 const REVIEW_CHANGE_EVENT_TYPES = new Set([
   "fix_completed",
   "local_fix_completed",
+  "merge_conflict_resolved",
   "fix_reverted",
   "comments_replied",
   "review_published",
@@ -52,6 +56,20 @@ const REVIEW_CHANGE_EVENT_TYPES = new Set([
 ]);
 
 let coordinatorInterval: ReturnType<typeof setInterval> | null = null;
+
+function shouldSkipAutoMergeConflictRetry(pr: PRInfo): boolean {
+  const latestMergeEvent = getTimeline(pr.repo, pr.number, 20).find((event) =>
+    event.eventType === "merge_conflict_resolution_failed" ||
+    event.eventType === "merge_conflict_resolved" ||
+    event.eventType === "merge_conflict_up_to_date",
+  );
+
+  if (!latestMergeEvent || latestMergeEvent.eventType !== "merge_conflict_resolution_failed") {
+    return false;
+  }
+
+  return new Date(latestMergeEvent.createdAt).getTime() >= new Date(pr.updatedAt).getTime();
+}
 
 function getBlockingJob(repo: string, prNumber: number) {
   return getAllJobs().find(
@@ -175,6 +193,7 @@ export function getSuggestedNextStep(
 
   const analyzerAgent = pickAvailableAnalyzer(settings.defaultAnalyzerAgent);
   const fixerAgent = pickAvailableFixer(settings.defaultFixerAgent);
+  const prState = getPRState(repo, prNumber);
   const githubComments = getCommentsByPR(repo, prNumber);
   const localComments = getAllReviewComments(repo, prNumber);
   const reviews = getLatestReviewPerReviewer(repo, prNumber);
@@ -215,6 +234,8 @@ export function getSuggestedNextStep(
   const unresolvedTotal = unresolvedGithubCount + unresolvedLocalCount;
   const lowestScoredReview = getLowestScoredReview(decisionReviews);
   const mergeReadyScore = lowestScoredReview !== null && lowestScoredReview.confidenceScore >= 4;
+  const needsMergeConflictResolution = needsConflictResolution(prState?.mergeable ?? null, prState?.mergeStateStatus ?? null);
+  const mergeConflictReason = describeMergeBlockage(prState?.mergeable ?? null, prState?.mergeStateStatus ?? null);
   const scoreNeedsAttention =
     lowestScoredReview !== null &&
     (lowestScoredReview.confidenceScore <= 2 ||
@@ -227,6 +248,17 @@ export function getSuggestedNextStep(
         REVIEW_CHANGE_EVENT_TYPES.has(event.eventType) &&
         new Date(event.createdAt).getTime() > new Date(lowestScoredReview.createdAt).getTime(),
     );
+
+  if (needsMergeConflictResolution) {
+    return {
+      action: "resolve_merge_conflict",
+      title: "Resolve merge conflict first",
+      description: mergeConflictReason ?? "The PR is blocked on its merge state. Sync it with the base branch before other work continues.",
+      tone: "warning",
+      canExecute: fixerAgent !== null,
+      agent: fixerAgent ?? settings.defaultFixerAgent,
+    };
+  }
 
   if (unanalyzed.length > 0) {
     return {
@@ -406,6 +438,12 @@ export async function executeSuggestedNextStep(
         body: JSON.stringify({ fixerAgent: step.agent ?? settings.defaultFixerAgent }),
       }, { waitForCompletion });
       break;
+    case "resolve_merge_conflict":
+      await callInternalApi(`/api/prs/${encodedRepo}/${prNumber}/resolve-conflicts`, {
+        method: "POST",
+        body: JSON.stringify({ fixerAgent: step.agent ?? settings.defaultFixerAgent }),
+      }, { waitForCompletion });
+      break;
     case "publish_review":
       for (const reviewerId of step.reviewerIds ?? []) {
         await callInternalApi(`/api/reviews/${encodedRepo}/${prNumber}/${reviewerId}/publish`, {
@@ -467,8 +505,20 @@ async function runCoordinatorPass(): Promise<void> {
       const prs = await listOpenPRs(repoConfig);
 
       for (const pr of prs) {
+        const currentPR = getPRState(repoConfig.label, pr.number);
+        if (
+          currentPR?.mergeable !== pr.mergeable ||
+          currentPR?.mergeStateStatus !== pr.mergeStateStatus ||
+          currentPR?.headRefName !== pr.headRefName ||
+          currentPR?.baseRefName !== pr.baseRefName
+        ) {
+          syncPRStateMetadata(pr);
+        }
         const suggestion = getSuggestedNextStep(repoConfig.label, pr.number);
         if (suggestion.action === "busy" || !suggestion.canExecute) continue;
+        if (suggestion.action === "resolve_merge_conflict" && shouldSkipAutoMergeConflictRetry(pr)) {
+          continue;
+        }
 
         updateJobStep(jobId, `${repoConfig.label} #${pr.number}`, suggestion.title);
         await executeSuggestedNextStep(repoConfig.label, pr.number, suggestion, { waitForCompletion: false });

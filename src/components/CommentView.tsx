@@ -127,6 +127,9 @@ const FIX_PAIR_EVENT_TYPES = new Set([
   "local_fix_completed",
   "local_fix_no_changes",
   "local_fix_failed",
+  "merge_conflict_resolved",
+  "merge_conflict_up_to_date",
+  "merge_conflict_resolution_failed",
 ]);
 
 const REVIEW_CHANGE_EVENT_TYPES = new Set([
@@ -169,6 +172,9 @@ function sameTimelinePair(newer: TimelineEvent, older: TimelineEvent): boolean {
   }
 
   if (FIX_PAIR_EVENT_TYPES.has(newer.eventType)) {
+    if (newer.eventType.startsWith("merge_conflict_")) {
+      return older.eventType === "merge_conflict_resolution_started" && newer.detail.fixerAgent === older.detail.fixerAgent;
+    }
     const expectedStart =
       newer.eventType.startsWith("local_") ? "local_fix_started" : "fix_started";
     return older.eventType === expectedStart && newer.detail.fixerAgent === older.detail.fixerAgent;
@@ -1058,6 +1064,10 @@ const timelineEventConfig: Record<string, { icon: typeof Sparkles; label: string
   fix_completed: { icon: Check, label: "Fix committed", color: "text-emerald-400" },
   fix_no_changes: { icon: AlertCircle, label: "Fix — no changes", color: "text-muted-foreground" },
   fix_failed: { icon: X, label: "Fix failed", color: "text-destructive" },
+  merge_conflict_resolution_started: { icon: Wrench, label: "Conflict resolution started", color: "text-yellow-400" },
+  merge_conflict_resolved: { icon: Check, label: "Conflict resolved", color: "text-emerald-400" },
+  merge_conflict_up_to_date: { icon: AlertCircle, label: "Already up to date", color: "text-muted-foreground" },
+  merge_conflict_resolution_failed: { icon: X, label: "Conflict resolution failed", color: "text-destructive" },
   local_fix_started: { icon: Wrench, label: "Local fix started", color: "text-yellow-400" },
   local_fix_completed: { icon: Check, label: "Local fix committed", color: "text-emerald-400" },
   local_fix_no_changes: { icon: AlertCircle, label: "Local fix — no changes", color: "text-muted-foreground" },
@@ -1107,14 +1117,22 @@ function formatTimelineDetail(event: TimelineEvent): string | null {
     case "fix_started":
     case "local_fix_started":
       return `${d.commentCount} comment(s) with ${localAgentLabel(d.fixerAgent as FixerAgent | undefined)}`;
+    case "merge_conflict_resolution_started":
+      return `${localAgentLabel(d.fixerAgent as FixerAgent | undefined)} • ${String(d.baseBranch ?? "")} -> ${String(d.branch ?? "")}`;
     case "fix_completed":
     case "local_fix_completed":
+      return `${localAgentLabel(d.fixerAgent as FixerAgent | undefined)} • ${d.commitHash} • ${(d.filesChanged as string[])?.length ?? 0} file(s) • cycle #${d.cycle}`;
+    case "merge_conflict_resolved":
       return `${localAgentLabel(d.fixerAgent as FixerAgent | undefined)} • ${d.commitHash} • ${(d.filesChanged as string[])?.length ?? 0} file(s) • cycle #${d.cycle}`;
     case "fix_no_changes":
     case "local_fix_no_changes":
       return `${localAgentLabel(d.fixerAgent as FixerAgent | undefined)} ran but produced no diff`;
+    case "merge_conflict_up_to_date":
+      return `${String(d.branch ?? "")} already contains ${String(d.baseBranch ?? "")}`;
     case "fix_failed":
     case "local_fix_failed":
+      return `${localAgentLabel(d.fixerAgent as FixerAgent | undefined)}: ${String(d.error ?? "").slice(0, 120)}`;
+    case "merge_conflict_resolution_failed":
       return `${localAgentLabel(d.fixerAgent as FixerAgent | undefined)}: ${String(d.error ?? "").slice(0, 120)}`;
     case "review_requested":
       return String(d.reviewerName ?? d.reviewerId ?? "");
@@ -1999,7 +2017,7 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
         title: nextStep.title,
         description: nextStep.description,
         icon:
-          nextStep.action === "fix_github" || nextStep.action === "fix_local"
+          nextStep.action === "fix_github" || nextStep.action === "fix_local" || nextStep.action === "resolve_merge_conflict"
             ? Wrench
             : nextStep.action === "publish_review"
               ? Upload
@@ -2018,7 +2036,9 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
           nextStep.canExecute
             ? executeNextStep.isPending
               ? "Running..."
-              : nextStep.action === "request_review"
+              : nextStep.action === "resolve_merge_conflict"
+                ? "Resolve conflict"
+                : nextStep.action === "request_review"
                 ? "Request review"
                 : nextStep.action === "publish_review"
                   ? "Publish"
@@ -2056,7 +2076,7 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
   );
 
   return (
-    <div className="space-y-4">
+    <div>
       <PROverview
         repo={repo}
         prNumber={prNumber}
@@ -2073,6 +2093,7 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
         }
       />
 
+      <div className="space-y-4 px-6 pb-6 pt-4">
       {/* Analysis progress panel (scoped to this PR) */}
       {(analyze.progressFor(repo, prNumber) || analyzeLocal.progressFor(repo, prNumber)) && (
         <AnalysisProgressPanel progress={(analyze.progressFor(repo, prNumber) ?? analyzeLocal.progressFor(repo, prNumber))!} />
@@ -2747,6 +2768,7 @@ export function CommentView({ repo, prNumber }: CommentViewProps) {
         }}
         onCancel={() => setGuardDialog(null)}
       />
+      </div>
     </div>
   );
 }

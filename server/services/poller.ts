@@ -1,4 +1,11 @@
-import { getRepos, upsertGitHubComments, updateLastPoll, cleanupClosedPRComments, recordTimelineEvent } from "./db.js";
+import {
+  getRepos,
+  upsertGitHubComments,
+  updateLastPoll,
+  cleanupClosedPRComments,
+  recordTimelineEvent,
+  syncPRStateMetadata,
+} from "./db.js";
 import { listOpenPRs, fetchBotComments } from "./github.js";
 import type { RepoConfig, PRInfo } from "../types.js";
 import { getReviewService } from "../infrastructure/reviewers/registry.js";
@@ -39,6 +46,9 @@ export async function syncRepo(repo: RepoConfig): Promise<{ prs: PRInfo[]; newCo
   try {
     updateJobStep(jobId, `Listing open PRs for ${repo.label}`);
     const prs = await listOpenPRs(repo);
+    for (const pr of prs) {
+      syncPRStateMetadata(pr);
+    }
     let newCount = 0;
 
     // Fetch comments for all PRs in parallel

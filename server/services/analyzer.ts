@@ -13,6 +13,7 @@ import type {
   AnalysisSeverity,
   AnalysisVerdict,
 } from "../types.js";
+import { fetchOrigin } from "./git.js";
 import { getPRBranch, getPRDiff } from "./github.js";
 
 const execAsync = promisify(exec);
@@ -403,7 +404,7 @@ export async function analyzeComments(
         progress: 20,
       });
       try {
-        await execAsync("git fetch origin", { cwd: repo.localPath, timeout: 60000 });
+        await fetchOrigin(repo.localPath);
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `pr-analyze-${analyzerAgent}-`));
         await execAsync(`git worktree add ${tmpDir} origin/${branch}`, {
           cwd: repo.localPath,

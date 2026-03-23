@@ -3,7 +3,8 @@ import { promisify } from "util";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import type { PRInfo, BotComment, RepoConfig } from "../types.js";
+import type { PRInfo, BotComment, RepoConfig, PRMergeStateStatus, PRMergeable } from "../types.js";
+import { fetchOrigin } from "./git.js";
 
 const execAsync = promisify(exec);
 
@@ -20,6 +21,10 @@ export interface PROverview {
   url: string;
   headRefName: string;
   baseRefName: string;
+  mergeable: PRMergeable | null;
+  mergeStateStatus: PRMergeStateStatus | null;
+  needsConflictResolution: boolean;
+  blockedReason: string | null;
   author: string;
   createdAt: string;
   updatedAt: string;
@@ -73,16 +78,52 @@ function parseNDJSON<T>(raw: string): T[] {
   return results;
 }
 
+export function needsConflictResolution(
+  mergeable: PRMergeable | null | undefined,
+  mergeStateStatus: PRMergeStateStatus | null | undefined,
+): boolean {
+  return (
+    mergeable === "CONFLICTING" ||
+    mergeStateStatus === "DIRTY" ||
+    mergeStateStatus === "BEHIND" ||
+    mergeStateStatus === "BLOCKED"
+  );
+}
+
+export function describeMergeBlockage(
+  mergeable: PRMergeable | null | undefined,
+  mergeStateStatus: PRMergeStateStatus | null | undefined,
+): string | null {
+  if (!needsConflictResolution(mergeable, mergeStateStatus)) return null;
+
+  if (mergeable === "CONFLICTING" || mergeStateStatus === "DIRTY") {
+    return "GitHub reports merge conflicts with the base branch.";
+  }
+
+  if (mergeStateStatus === "BEHIND") {
+    return "The PR branch is behind the base branch and should be synced before other work continues.";
+  }
+
+  if (mergeStateStatus === "BLOCKED") {
+    return "GitHub reports the PR as blocked, so the first recovery step is syncing it with the base branch.";
+  }
+
+  return "The PR is blocked from merging and should be synced with the base branch first.";
+}
+
 export async function listOpenPRs(repo: RepoConfig): Promise<PRInfo[]> {
   try {
     const raw = await gh(
-      `pr list --repo ${repo.label} --author @me --state open --json number,title,url,headRefName,author,createdAt,updatedAt`,
+      `pr list --repo ${repo.label} --author @me --state open --json number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,author,createdAt,updatedAt`,
     );
     const prs = JSON.parse(raw) as Array<{
       number: number;
       title: string;
       url: string;
       headRefName: string;
+      baseRefName: string;
+      mergeable?: PRMergeable | null;
+      mergeStateStatus?: PRMergeStateStatus | null;
       author: { login: string };
       createdAt: string;
       updatedAt: string;
@@ -92,6 +133,9 @@ export async function listOpenPRs(repo: RepoConfig): Promise<PRInfo[]> {
       title: pr.title,
       url: pr.url,
       headRefName: pr.headRefName,
+      baseRefName: pr.baseRefName,
+      mergeable: pr.mergeable ?? null,
+      mergeStateStatus: pr.mergeStateStatus ?? null,
       author: pr.author.login,
       repo: repo.label,
       createdAt: pr.createdAt,
@@ -105,7 +149,7 @@ export async function listOpenPRs(repo: RepoConfig): Promise<PRInfo[]> {
 export async function getPROverview(repo: string, prNumber: number): Promise<PROverview | null> {
   try {
     const raw = await gh(
-      `pr view ${prNumber} --repo ${repo} --json number,title,body,url,headRefName,baseRefName,author,createdAt,updatedAt,additions,deletions,files,commits`,
+      `pr view ${prNumber} --repo ${repo} --json number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,author,createdAt,updatedAt,additions,deletions,files,commits`,
     );
     const pr = JSON.parse(raw) as {
       number: number;
@@ -114,6 +158,8 @@ export async function getPROverview(repo: string, prNumber: number): Promise<PRO
       url: string;
       headRefName: string;
       baseRefName: string;
+      mergeable?: PRMergeable | null;
+      mergeStateStatus?: PRMergeStateStatus | null;
       author?: { login?: string | null } | null;
       createdAt: string;
       updatedAt: string;
@@ -142,6 +188,10 @@ export async function getPROverview(repo: string, prNumber: number): Promise<PRO
       url: pr.url,
       headRefName: pr.headRefName,
       baseRefName: pr.baseRefName,
+      mergeable: pr.mergeable ?? null,
+      mergeStateStatus: pr.mergeStateStatus ?? null,
+      needsConflictResolution: needsConflictResolution(pr.mergeable ?? null, pr.mergeStateStatus ?? null),
+      blockedReason: describeMergeBlockage(pr.mergeable ?? null, pr.mergeStateStatus ?? null),
       author: pr.author?.login ?? "unknown",
       createdAt: pr.createdAt,
       updatedAt: pr.updatedAt,
@@ -359,7 +409,7 @@ export async function getPRDiff(
   // Fallback: use local git diff if we have a local checkout
   if (localPath && branch) {
     try {
-      await execAsync("git fetch origin", { cwd: localPath, timeout: 60000 });
+      await fetchOrigin(localPath);
       const { stdout } = await execAsync(
         `git diff origin/main...origin/${branch}`,
         { cwd: localPath, encoding: "utf-8", timeout: 30000, maxBuffer: 10 * 1024 * 1024 },

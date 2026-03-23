@@ -1,4 +1,5 @@
 import { exec, execSync, spawn } from "child_process";
+import crypto from "crypto";
 import { promisify } from "util";
 import fs from "fs";
 import os from "os";
@@ -13,6 +14,7 @@ import type {
 } from "../types.js";
 import { appendRunHistory, getRunHistory } from "./db.js";
 import { getReviewService } from "../infrastructure/reviewers/registry.js";
+import { fetchOrigin } from "./git.js";
 import { buildPersistedRunHistory } from "./runHistory.js";
 
 const execAsync = promisify(exec);
@@ -266,6 +268,34 @@ interface WorkDir {
   transientSymlinkPaths: string[];
 }
 
+const ANSI_ESCAPE_PATTERN = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE_PATTERN, "");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function sanitizeWorktreeNamePart(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return sanitized || "fix";
+}
+
+async function resolveProjectRoot(repoPath: string): Promise<string> {
+  const { stdout } = await execAsync("git rev-parse --git-common-dir", {
+    cwd: repoPath,
+    timeout: 30000,
+  });
+  const gitCommonDir = stdout.trim();
+  if (!gitCommonDir) return repoPath;
+  const absoluteGitCommonDir = path.isAbsolute(gitCommonDir)
+    ? gitCommonDir
+    : path.resolve(repoPath, gitCommonDir);
+  return path.dirname(absoluteGitCommonDir);
+}
+
 async function restoreWorkspaceMutations(
   workDir: string,
   restorePaths: string[],
@@ -281,23 +311,24 @@ async function restoreWorkspaceMutations(
   }
 
   if (restorePaths.length > 0) {
-    const quotedPaths = restorePaths.map((p) => JSON.stringify(p)).join(" ");
+    const quotedPaths = restorePaths.map((p) => shellQuote(p)).join(" ");
     await execAsync(`git checkout -- ${quotedPaths}`, { cwd: workDir });
   }
 }
 
 export async function getWorkDir(repo: RepoConfig, branch: string, fixerAgent?: FixerAgent): Promise<WorkDir> {
   if (repo.localPath) {
-    await execAsync("git fetch origin", {
-      cwd: repo.localPath,
-      timeout: 60000,
-    });
+    const projectRoot = await resolveProjectRoot(repo.localPath);
+    await fetchOrigin(projectRoot);
 
-    // Use a temporary worktree to avoid conflicts with branches
-    // already checked out in other worktrees
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-fix-"));
-    await execAsync(`git worktree add ${tmpDir} origin/${branch}`, {
-      cwd: repo.localPath,
+    // Create commit-capable worktrees under .worktrees/ so repos with
+    // path-based commit guards accept the generated commit.
+    const worktreesDir = path.join(projectRoot, ".worktrees");
+    fs.mkdirSync(worktreesDir, { recursive: true });
+    const worktreeName = `pr-fix-${sanitizeWorktreeNamePart(branch)}-${crypto.randomUUID().slice(0, 8)}`;
+    const tmpDir = path.join(worktreesDir, worktreeName);
+    await execAsync(`git worktree add ${shellQuote(tmpDir)} origin/${branch}`, {
+      cwd: projectRoot,
       timeout: 60000,
     });
 
@@ -313,13 +344,28 @@ export async function getWorkDir(repo: RepoConfig, branch: string, fixerAgent?: 
       restorePaths.push(".claude/hooks");
     }
 
-    // Symlink node_modules from the local repo so formatters/linters
-    // (e.g. prettier with plugins) can resolve their dependencies
-    const localNodeModules = path.join(repo.localPath, "node_modules");
-    const worktreeNodeModules = path.join(tmpDir, "node_modules");
-    if (fs.existsSync(localNodeModules) && !fs.existsSync(worktreeNodeModules)) {
-      fs.symlinkSync(localNodeModules, worktreeNodeModules, "dir");
-      transientSymlinkPaths.push("node_modules");
+    const rootEnvLocalPath = path.join(projectRoot, ".env.local");
+    const worktreeEnvLocalPath = path.join(tmpDir, ".env.local");
+    if (fs.existsSync(rootEnvLocalPath) && !fs.existsSync(worktreeEnvLocalPath)) {
+      fs.copyFileSync(rootEnvLocalPath, worktreeEnvLocalPath);
+    }
+
+    // Symlink generated dependency artifacts from the local repo so the
+    // temporary worktree can resolve installed packages.
+    const transientDependencyPaths = [
+      "node_modules",
+      ".pnp.cjs",
+      ".pnp.js",
+      ".pnp.loader.mjs",
+    ];
+    for (const relativePath of transientDependencyPaths) {
+      const localDependencyPath = path.join(repo.localPath, relativePath);
+      const worktreeDependencyPath = path.join(tmpDir, relativePath);
+      if (!fs.existsSync(localDependencyPath) || fs.existsSync(worktreeDependencyPath)) continue;
+
+      const symlinkType = fs.lstatSync(localDependencyPath).isDirectory() ? "dir" : "file";
+      fs.symlinkSync(localDependencyPath, worktreeDependencyPath, symlinkType);
+      transientSymlinkPaths.push(relativePath);
     }
 
     return {
@@ -328,8 +374,8 @@ export async function getWorkDir(repo: RepoConfig, branch: string, fixerAgent?: 
       transientSymlinkPaths,
       cleanup: async () => {
         await restoreWorkspaceMutations(tmpDir, restorePaths, transientSymlinkPaths);
-        await execAsync(`git worktree remove ${JSON.stringify(tmpDir)} --force`, {
-          cwd: repo.localPath,
+        await execAsync(`git worktree remove ${shellQuote(tmpDir)} --force`, {
+          cwd: projectRoot,
         });
       },
     };
@@ -615,6 +661,50 @@ function detectPackageManager(workDir: string): "pnpm" | "yarn" | "npm" {
   return "npm";
 }
 
+function hasInstalledNodeDependencies(workDir: string): boolean {
+  if (fs.existsSync(path.join(workDir, "node_modules"))) return true;
+  if (fs.existsSync(path.join(workDir, ".pnp.cjs"))) return true;
+  if (fs.existsSync(path.join(workDir, ".pnp.js"))) return true;
+  if (fs.existsSync(path.join(workDir, ".pnp.loader.mjs"))) return true;
+  return false;
+}
+
+function getDependencyInstallCommand(packageManager: "pnpm" | "yarn" | "npm"): string {
+  return packageManager === "pnpm"
+    ? "pnpm install"
+    : packageManager === "yarn"
+      ? "yarn install"
+      : "npm install";
+}
+
+async function ensureNodeDependenciesInstalled(
+  workDir: string,
+  onOutput?: (line: string) => void,
+): Promise<void> {
+  const pkgPath = path.join(workDir, "package.json");
+  if (!fs.existsSync(pkgPath) || hasInstalledNodeDependencies(workDir)) return;
+
+  const pm = detectPackageManager(workDir);
+  const installCommand = getDependencyInstallCommand(pm);
+  onOutput?.(`Installing dependencies with ${installCommand}`);
+
+  try {
+    await runLoggedCommand(installCommand, { cwd: workDir, timeout: 900000, onOutput });
+  } catch (err) {
+    throw new Error(
+      `Dependency installation failed for "${installCommand}": ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  if (!hasInstalledNodeDependencies(workDir)) {
+    throw new Error(
+      `Dependency installation completed but required artifacts are still missing after "${installCommand}"`,
+    );
+  }
+
+  onOutput?.("Dependency installation complete");
+}
+
 interface LoggedCommandOptions {
   cwd: string;
   timeout?: number;
@@ -633,12 +723,12 @@ function createLineForwarder(onLine?: (line: string) => void): {
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
       for (const line of lines) {
-        const trimmed = line.trim();
+        const trimmed = stripAnsi(line).trim();
         if (trimmed) onLine?.(trimmed);
       }
     },
     flush() {
-      const trimmed = buffer.trim();
+      const trimmed = stripAnsi(buffer).trim();
       if (trimmed) onLine?.(trimmed);
       buffer = "";
     },
@@ -758,7 +848,7 @@ async function runPostFixFormatting(
     // Only format the files the fixer actually changed
     const files = changedFiles
       .filter((f) => !f.startsWith("."))
-      .map((f) => JSON.stringify(f))
+      .map((f) => shellQuote(f))
       .join(" ");
     if (!files) return;
     onOutput?.(`Running prettier on ${changedFiles.length} changed file(s)`);
@@ -774,6 +864,7 @@ async function runPostFixFormatting(
 
 async function runPostFixVerification(
   workDir: string,
+  skipTypecheck = false,
   onOutput?: (line: string) => void,
 ): Promise<void> {
   onOutput?.("Running git diff --check");
@@ -811,6 +902,18 @@ async function runPostFixVerification(
   if (commands.length === 0) {
     onOutput?.("No verification script found; skipped repo verification");
     return;
+  }
+
+  if (skipTypecheck) {
+    onOutput?.("Skipping repo verification script per repository setting");
+    return;
+  }
+
+  if (!hasInstalledNodeDependencies(workDir)) {
+    const installCommand = getDependencyInstallCommand(pm);
+    throw new Error(
+      `Dependencies are still missing before verification. Expected node_modules or Yarn PnP artifacts after "${installCommand}"`,
+    );
   }
 
   for (const command of commands) {
@@ -906,7 +1009,11 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
   };
 
   logHistoryStep("Preparing workspace", `Fetching branch ${branch}`);
-  const { workDir, cleanup, restorePaths, transientSymlinkPaths } = await getWorkDir(repo, branch, fixerAgent);
+  const { workDir, cleanup, restorePaths, transientSymlinkPaths } = await getWorkDir(
+    repo,
+    branch,
+    fixerAgent,
+  );
 
   try {
     logHistoryStep(`Running ${agentLabel} fix`, `${comments.length} issue(s) to address`);
@@ -978,14 +1085,24 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
 
     const filesChanged = cleanDiff.trim().split("\n").filter(Boolean);
 
+    if (fs.existsSync(path.join(workDir, "package.json")) && !hasInstalledNodeDependencies(workDir)) {
+      logHistoryStep("Installing dependencies", detectPackageManager(workDir));
+      await ensureNodeDependenciesInstalled(workDir, (line) => {
+        logHistoryOutput(line);
+      });
+    }
+
     // Run post-fix formatting (prettier, format script, etc.)
     logHistoryStep("Running formatters", `${filesChanged.length} file(s)`);
     await runPostFixFormatting(workDir, filesChanged, (line) => {
       logHistoryOutput(line);
     });
 
-    logHistoryStep("Running verification");
-    await runPostFixVerification(workDir, (line) => {
+    logHistoryStep(
+      "Running verification",
+      repo.skipTypecheck ? "git diff --check only (repo verification script disabled)" : undefined,
+    );
+    await runPostFixVerification(workDir, Boolean(repo.skipTypecheck), (line) => {
       logHistoryOutput(line);
     });
 
@@ -998,7 +1115,7 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
     const commitMsgFile = path.join(os.tmpdir(), `commit-msg-${Date.now()}.txt`);
     fs.writeFileSync(commitMsgFile, commitMessage, "utf-8");
     try {
-      await execAsync(`git commit -F ${JSON.stringify(commitMsgFile)}`, {
+      await execAsync(`git commit -F ${shellQuote(commitMsgFile)}`, {
         cwd: workDir,
       });
     } finally {
@@ -1028,6 +1145,569 @@ export async function fixComments(input: FixCommentsInput): Promise<FixResult[]>
       commitMessage,
       fixedAt,
     }));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    failHistory(msg);
+    throw err;
+  } finally {
+    await cleanup();
+  }
+}
+
+interface ResolveMergeConflictInput {
+  fixerAgent: FixerAgent;
+  repo: RepoConfig;
+  branch: string;
+  baseBranch: string;
+  prNumber: number;
+  prTitle: string;
+  mergeStateStatus?: string | null;
+  onDebug?: (debugDetail: Record<string, unknown>) => void;
+  onHistoryUpdate?: (history: PersistedRunHistory) => void;
+}
+
+export interface ResolveMergeConflictResult {
+  filesChanged: string[];
+  commitHash: string;
+  commitMessage: string;
+  fixedAt: string;
+}
+
+function buildMergeConflictPrompt(input: {
+  agent: FixerAgent;
+  prTitle: string;
+  branch: string;
+  baseBranch: string;
+  mergeStateStatus?: string | null;
+  conflictedFiles: string[];
+  gitStatus: string;
+}): string {
+  const agentLabel = getFixerAgentLabel(input.agent);
+  const conflictList = input.conflictedFiles.map((file) => `- ${file}`).join("\n");
+
+  return `You are resolving a pull request merge conflict.
+
+## PR: ${input.prTitle}
+## Head branch: ${input.branch}
+## Base branch: ${input.baseBranch}
+## GitHub merge state: ${input.mergeStateStatus ?? "unknown"}
+
+## Conflicted files
+${conflictList || "- none reported"}
+
+## Git status
+\`\`\`
+${input.gitStatus}
+\`\`\`
+
+## Instructions
+
+**IMPORTANT: A git merge is already in progress in this worktree. Do NOT run any git commands (no fetch, no checkout, no merge, no rebase, no commit, no worktree operations). Do NOT remove the merge state. Just edit files to resolve the conflicts.**
+
+1. Follow visible repository instructions in this worktree, including files like AGENTS.md when present
+2. Read the conflicted files and any nearby code that determines the correct merged behavior
+3. Resolve the conflict markers so the result preserves the intended PR changes while staying compatible with the latest base branch
+4. Prefer the smallest correct merge result; do not do unrelated cleanup
+5. Remove every conflict marker and leave the files ready to stage
+6. Do not remove or rename branch-visible exports, public APIs, or entry points unless you also update every affected caller in this same resolution
+7. If the base branch refactored code into different modules, preserve branch behavior first; do not assume the branch should adopt the new architecture unless the callers are migrated and validated here
+8. Run the lightest relevant validation if it helps you confirm the merge result
+9. Stop if the correct resolution would require a product decision, a broad refactor, or touching many files outside the conflicted set
+
+Leave the worktree ready for the backend to run verification and create the merge commit. Use ${agentLabel} carefully and prefer correctness over speed.`;
+}
+
+function buildMergeConflictCommitMessage(branch: string, baseBranch: string): string {
+  return `chore(merge): sync ${branch} with ${baseBranch}
+
+Merge ${baseBranch} into ${branch} to unblock the pull request.`;
+}
+
+const MERGE_CONFLICT_MAX_REMOVED_EXPORTS = 8;
+const MERGE_CONFLICT_MAX_ADDITIONAL_EDIT_FILES = 3;
+
+interface MergeConflictSafetyBaseline {
+  branchExportsByFile: Record<string, string[]>;
+}
+
+function isTrackedCodeModule(filePath: string): boolean {
+  return /\.(?:[cm]?[jt]sx?)$/i.test(filePath) && !filePath.endsWith(".d.ts");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractNamedExports(source: string): string[] {
+  const exports = new Set<string>();
+
+  const declarationPattern =
+    /export\s+(?:async\s+function|function|const|let|var|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)/g;
+  for (const match of source.matchAll(declarationPattern)) {
+    const name = match[1]?.trim();
+    if (name) exports.add(name);
+  }
+
+  const listPattern = /export\s*{\s*([^}]+)\s*}(?:\s*from\s*["'][^"']+["'])?/gs;
+  for (const match of source.matchAll(listPattern)) {
+    const block = match[1];
+    if (!block) continue;
+    for (const part of block.split(",")) {
+      const cleaned = part.trim();
+      if (!cleaned) continue;
+      const aliasParts = cleaned.split(/\s+as\s+/i);
+      const exportedName = aliasParts[1]?.trim() || aliasParts[0]?.trim();
+      if (exportedName && /^[A-Za-z_$][\w$]*$/.test(exportedName)) {
+        exports.add(exportedName);
+      }
+    }
+  }
+
+  return Array.from(exports).sort((a, b) => a.localeCompare(b));
+}
+
+async function readFileFromGitRef(workDir: string, ref: string, filePath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(`git show ${shellQuote(`${ref}:${filePath}`)}`, {
+      cwd: workDir,
+      timeout: 30000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+async function captureMergeConflictSafetyBaseline(
+  workDir: string,
+  conflictedFiles: string[],
+): Promise<MergeConflictSafetyBaseline> {
+  const branchExportsByFile: Record<string, string[]> = {};
+
+  for (const filePath of conflictedFiles) {
+    if (!isTrackedCodeModule(filePath)) continue;
+    const source = await readFileFromGitRef(workDir, "HEAD", filePath);
+    if (!source) continue;
+    const exports = extractNamedExports(source);
+    if (exports.length > 0) {
+      branchExportsByFile[filePath] = exports;
+    }
+  }
+
+  return { branchExportsByFile };
+}
+
+async function getWorkingTreeExports(workDir: string, filePath: string): Promise<string[]> {
+  if (!isTrackedCodeModule(filePath)) return [];
+  const absolutePath = path.join(workDir, filePath);
+  if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) return [];
+  const source = fs.readFileSync(absolutePath, "utf-8");
+  return extractNamedExports(source);
+}
+
+async function findSymbolUsages(workDir: string, symbol: string, excludedFiles: Set<string>): Promise<string[]> {
+  if (!symbol) return [];
+
+  const rgPattern = `\\b${escapeRegExp(symbol)}\\b`;
+  const command = [
+    "rg",
+    "-n",
+    "--color",
+    "never",
+    "--hidden",
+    "--glob",
+    "'!node_modules'",
+    "--glob",
+    "'!.git'",
+    "--glob",
+    "'!dist'",
+    "--glob",
+    "'!build'",
+    "--glob",
+    "'!coverage'",
+    "--glob",
+    "'!**/_generated/**'",
+    "--glob",
+    "'!**/*.d.ts'",
+    "--glob",
+    "'*.ts'",
+    "--glob",
+    "'*.tsx'",
+    "--glob",
+    "'*.js'",
+    "--glob",
+    "'*.jsx'",
+    "--glob",
+    "'*.mjs'",
+    "--glob",
+    "'*.cjs'",
+    shellQuote(rgPattern),
+    ".",
+  ].join(" ");
+
+  try {
+    const { stdout } = await execAsync(command, {
+      cwd: workDir,
+      timeout: 30000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => {
+        const firstColon = line.indexOf(":");
+        if (firstColon === -1) return false;
+        const filePath = line.slice(0, firstColon);
+        return !excludedFiles.has(filePath);
+      })
+      .slice(0, 10);
+  } catch (err) {
+    const error = err as { code?: number };
+    if (error?.code === 1) return [];
+    throw err;
+  }
+}
+
+async function evaluateMergeConflictResolutionSafety(input: {
+  workDir: string;
+  conflictedFiles: string[];
+  baseline: MergeConflictSafetyBaseline;
+  additionalEditedFiles: string[];
+}): Promise<string[]> {
+  const findings: string[] = [];
+
+  if (input.additionalEditedFiles.length > MERGE_CONFLICT_MAX_ADDITIONAL_EDIT_FILES) {
+    findings.push(
+      `Manual review required: conflict resolution edited ${input.additionalEditedFiles.length} additional file(s) outside the conflicted set (${input.additionalEditedFiles.slice(0, 5).join(", ")}).`,
+    );
+  }
+
+  const removedExportsWithCallers: string[] = [];
+  const broadlyRemovedExports: string[] = [];
+
+  for (const [filePath, branchExports] of Object.entries(input.baseline.branchExportsByFile)) {
+    if (branchExports.length === 0) continue;
+
+    const resolvedExports = new Set(await getWorkingTreeExports(input.workDir, filePath));
+    const removedExports = branchExports.filter((name) => !resolvedExports.has(name));
+
+    if (removedExports.length > MERGE_CONFLICT_MAX_REMOVED_EXPORTS) {
+      broadlyRemovedExports.push(`${filePath}: ${removedExports.slice(0, 8).join(", ")}`);
+    }
+
+    for (const exportName of removedExports) {
+      const callers = await findSymbolUsages(input.workDir, exportName, new Set([filePath]));
+      if (callers.length === 0) continue;
+      removedExportsWithCallers.push(`${filePath} -> ${exportName} still referenced by ${callers.join(", ")}`);
+    }
+  }
+
+  if (broadlyRemovedExports.length > 0) {
+    findings.push(
+      `Manual review required: conflict resolution removed a large branch export surface (${broadlyRemovedExports.join(" | ")}).`,
+    );
+  }
+
+  if (removedExportsWithCallers.length > 0) {
+    findings.push(
+      `Manual review required: removed branch exports still have callers (${removedExportsWithCallers.join(" | ")}).`,
+    );
+  }
+
+  return findings;
+}
+
+export async function resolveMergeConflict(input: ResolveMergeConflictInput): Promise<ResolveMergeConflictResult | null> {
+  const {
+    fixerAgent,
+    repo,
+    branch,
+    baseBranch,
+    prNumber,
+    prTitle,
+    mergeStateStatus,
+    onDebug,
+    onHistoryUpdate,
+  } = input;
+  const repoLabel = repo.label;
+  const agentLabel = getFixerAgentLabel(fixerAgent);
+
+  if (!isFixerAgentAvailable(fixerAgent)) {
+    throw new Error(`${agentLabel} CLI is not available on this machine`);
+  }
+
+  const emitPersistedHistory = (overrides?: {
+    status?: PersistedRunHistory["status"];
+    detail?: string;
+    currentStep?: string;
+  }): void => {
+    if (!onHistoryUpdate) return;
+    const progress = getFixProgress(repoLabel, prNumber);
+    if (!progress) return;
+    const activeStep = progress.steps.find((step) => step.status === "active");
+    const currentStep =
+      overrides?.currentStep ??
+      activeStep?.step ??
+      progress.steps[progress.steps.length - 1]?.step;
+    const lastStep = progress.steps[progress.steps.length - 1];
+
+    onHistoryUpdate(
+      buildPersistedRunHistory({
+        status: overrides?.status,
+        startedAt: progress.startedAt,
+        finishedAt: progress.finishedAt,
+        currentStep,
+        detail: overrides?.detail ?? activeStep?.detail ?? lastStep?.detail,
+        steps: progress.steps,
+        output: progress.output,
+      }),
+    );
+  };
+
+  const logHistoryStep = (step: string, detail?: string): void => {
+    logStep(repoLabel, prNumber, step, detail, fixerAgent);
+    emitPersistedHistory({ detail, currentStep: step });
+  };
+
+  const logHistoryOutput = (line: string): void => {
+    logOutput(repoLabel, prNumber, line, fixerAgent);
+    emitPersistedHistory();
+  };
+
+  const completeHistory = (detail?: string): void => {
+    logDone(repoLabel, prNumber);
+    emitPersistedHistory({ status: "done", detail });
+  };
+
+  const failHistory = (error: string): void => {
+    logError(repoLabel, prNumber, error);
+    emitPersistedHistory({ status: "error", detail: error });
+  };
+
+  logHistoryStep("Preparing workspace", `Syncing ${branch} with ${baseBranch}`);
+  const { workDir, cleanup, restorePaths, transientSymlinkPaths } = await getWorkDir(repo, branch, fixerAgent);
+
+  try {
+    await fetchOrigin(workDir);
+
+    let realWorkDir: string;
+    try { realWorkDir = fs.realpathSync(workDir); } catch { realWorkDir = workDir; }
+    const pathVariants = [...new Set([realWorkDir, workDir])].sort((a, b) => b.length - a.length);
+    const cleanOutput = (line: string) => {
+      let cleaned = line;
+      for (const p of pathVariants) {
+        cleaned = cleaned.replaceAll(p + "/", "").replaceAll(p, ".");
+      }
+      logHistoryOutput(cleaned);
+    };
+
+    logHistoryStep("Merging base branch", `git merge origin/${baseBranch}`);
+    let mergeNeedsResolution = false;
+    try {
+      const { stdout, stderr } = await execAsync(`git merge --no-ff --no-commit origin/${baseBranch}`, {
+        cwd: workDir,
+        timeout: 60000,
+      });
+      for (const line of `${stdout}\n${stderr}`.split("\n")) {
+        if (line.trim()) cleanOutput(line.trim());
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      for (const line of message.split("\n")) {
+        if (line.trim()) cleanOutput(line.trim());
+      }
+      const { stdout: unmergedOutput } = await execAsync("git diff --name-only --diff-filter=U", {
+        cwd: workDir,
+        timeout: 30000,
+      });
+      mergeNeedsResolution = unmergedOutput.trim().length > 0;
+      if (!mergeNeedsResolution) {
+        throw err;
+      }
+    }
+
+    const { stdout: mergeHeadOutput } = await execAsync("git rev-parse -q --verify MERGE_HEAD", {
+      cwd: workDir,
+      timeout: 30000,
+    }).catch(() => ({ stdout: "" }));
+    if (!mergeHeadOutput.trim()) {
+      logHistoryStep("Already synchronized", `${branch} already contains ${baseBranch}`);
+      completeHistory(`${branch} already contains ${baseBranch}`);
+      return null;
+    }
+
+    if (mergeNeedsResolution) {
+      const { stdout: conflictedFilesOutput } = await execAsync("git diff --name-only --diff-filter=U", {
+        cwd: workDir,
+        timeout: 30000,
+      });
+      const conflictedFiles = conflictedFilesOutput
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const { stdout: gitStatusOutput } = await execAsync("git status --short", {
+        cwd: workDir,
+        timeout: 30000,
+      });
+      const mergeSafetyBaseline = await captureMergeConflictSafetyBaseline(workDir, conflictedFiles);
+
+      logHistoryStep(`Running ${agentLabel} conflict resolution`, `${conflictedFiles.length} conflicted file(s)`);
+      const prompt = buildMergeConflictPrompt({
+        agent: fixerAgent,
+        prTitle,
+        branch,
+        baseBranch,
+        mergeStateStatus,
+        conflictedFiles,
+        gitStatus: gitStatusOutput.trim() || "(no status output)",
+      });
+      onDebug?.({
+        fixerAgent,
+        repo: repo.label,
+        prNumber,
+        prTitle,
+        branch,
+        baseBranch,
+        mergeStateStatus: mergeStateStatus ?? null,
+        conflictedFiles,
+        prompt,
+      });
+      logHistoryOutput(`--- Prompt (${prompt.length} chars) ---`);
+      for (const file of conflictedFiles) {
+        logHistoryOutput(`  conflict: ${file}`);
+      }
+      logHistoryOutput("---");
+
+      const runFix = fixerAgent === "codex" ? runCodexFix : runClaudeFix;
+      await runFix(workDir, prompt, cleanOutput);
+
+      const { stdout: aiEditedFilesOutput } = await execAsync("git diff --name-only", {
+        cwd: workDir,
+        timeout: 30000,
+      });
+      const additionalEditedFiles = aiEditedFilesOutput
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .filter((filePath) => !conflictedFiles.includes(filePath));
+
+      // Mark edited files as resolved before checking for remaining unmerged entries.
+      await execAsync("git add -A", {
+        cwd: workDir,
+        timeout: 30000,
+      });
+
+      const { stdout: remainingConflictsOutput } = await execAsync("git diff --name-only --diff-filter=U", {
+        cwd: workDir,
+        timeout: 30000,
+      });
+      const remainingConflicts = remainingConflictsOutput
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (remainingConflicts.length > 0) {
+        throw new Error(`Merge conflict markers remain in: ${remainingConflicts.join(", ")}`);
+      }
+
+      logHistoryStep("Reviewing merge safety", `${conflictedFiles.length} conflicted file(s)`);
+      const safetyFindings = await evaluateMergeConflictResolutionSafety({
+        workDir,
+        conflictedFiles,
+        baseline: mergeSafetyBaseline,
+        additionalEditedFiles,
+      });
+      for (const finding of safetyFindings) {
+        cleanOutput(finding);
+      }
+      if (safetyFindings.length > 0) {
+        throw new Error(safetyFindings.join(" "));
+      }
+    }
+
+    logHistoryStep("Checking merge changes");
+    const { stdout: stagedFilesOutput } = await execAsync("git diff --cached --name-only", {
+      cwd: workDir,
+      timeout: 30000,
+    });
+    const stagedFiles = stagedFilesOutput
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    await restoreWorkspaceMutations(workDir, restorePaths, transientSymlinkPaths);
+    await execAsync("git add -A", {
+      cwd: workDir,
+      timeout: 30000,
+    });
+
+    const { stdout: filesToCommitOutput } = await execAsync("git diff --cached --name-only", {
+      cwd: workDir,
+      timeout: 30000,
+    });
+    const filesChanged = filesToCommitOutput
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (filesChanged.length === 0 && stagedFiles.length === 0) {
+      logHistoryStep("No merge changes", "Nothing changed after syncing with the base branch");
+      completeHistory("Nothing changed after syncing with the base branch");
+      return null;
+    }
+
+    if (fs.existsSync(path.join(workDir, "package.json")) && !hasInstalledNodeDependencies(workDir)) {
+      logHistoryStep("Installing dependencies", detectPackageManager(workDir));
+      await ensureNodeDependenciesInstalled(workDir, cleanOutput);
+    }
+
+    logHistoryStep("Running formatters", `${filesChanged.length || stagedFiles.length} file(s)`);
+    await runPostFixFormatting(workDir, filesChanged.length > 0 ? filesChanged : stagedFiles, cleanOutput);
+
+    logHistoryStep(
+      "Running verification",
+      repo.skipTypecheck ? "git diff --check only (repo verification script disabled)" : undefined,
+    );
+    await runPostFixVerification(workDir, Boolean(repo.skipTypecheck), cleanOutput);
+
+    logHistoryStep("Committing merge", `${filesChanged.length || stagedFiles.length} file(s) modified`);
+    await execAsync("git add -A", {
+      cwd: workDir,
+      timeout: 30000,
+    });
+    const commitMessage = buildMergeConflictCommitMessage(branch, baseBranch);
+    const commitMsgFile = path.join(os.tmpdir(), `merge-commit-msg-${Date.now()}.txt`);
+    fs.writeFileSync(commitMsgFile, commitMessage, "utf-8");
+    try {
+      await execAsync(`git commit -F ${shellQuote(commitMsgFile)}`, {
+        cwd: workDir,
+        timeout: 60000,
+      });
+    } finally {
+      try { fs.unlinkSync(commitMsgFile); } catch {}
+    }
+
+    logHistoryStep("Pushing to remote", `origin/${branch}`);
+    await execAsync(`git push origin HEAD:refs/heads/${branch}`, {
+      cwd: workDir,
+      timeout: 60000,
+    });
+
+    const { stdout: hashOutput } = await execAsync("git rev-parse --short HEAD", {
+      cwd: workDir,
+      timeout: 30000,
+    });
+    const commitHash = hashOutput.trim();
+
+    logHistoryStep("Merge conflict resolved", `${agentLabel} created commit ${commitHash}`);
+    completeHistory(`${agentLabel} created commit ${commitHash}`);
+
+    return {
+      filesChanged: filesChanged.length > 0 ? filesChanged : stagedFiles,
+      commitHash,
+      commitMessage,
+      fixedAt: new Date().toISOString(),
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     failHistory(msg);

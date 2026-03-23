@@ -4,6 +4,7 @@ export interface RepoConfig {
   label: string; // e.g. "ATID-Solutions/binah"
   botUsers: string[];
   localPath?: string;
+  skipTypecheck?: boolean;
 }
 
 export interface PRInfo {
@@ -11,11 +12,26 @@ export interface PRInfo {
   title: string;
   url: string;
   headRefName: string;
+  baseRefName: string;
+  mergeable: PRMergeable | null;
+  mergeStateStatus: PRMergeStateStatus | null;
   author: string;
   repo: string; // "owner/repo"
   createdAt: string;
   updatedAt: string;
 }
+
+export type PRMergeable = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+
+export type PRMergeStateStatus =
+  | "BEHIND"
+  | "BLOCKED"
+  | "CLEAN"
+  | "DIRTY"
+  | "DRAFT"
+  | "HAS_HOOKS"
+  | "UNKNOWN"
+  | "UNSTABLE";
 
 export interface BotComment {
   id: number;
@@ -111,6 +127,7 @@ export interface FixResult {
 
 export type PRPhase =
   | "polled"
+  | "blocked"
   | "analyzed"
   | "fixing"
   | "fixed"
@@ -127,6 +144,10 @@ export interface PRState {
   lastFixedAt: string | null;
   lastReReviewAt: string | null;
   fixResults: FixResult[];
+  mergeable?: PRMergeable | null;
+  mergeStateStatus?: PRMergeStateStatus | null;
+  headRefName?: string | null;
+  baseRefName?: string | null;
 }
 
 export interface AppSettings {

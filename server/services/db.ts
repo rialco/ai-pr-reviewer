@@ -6,6 +6,7 @@ import type {
   BotComment,
   AnalysisResult,
   FixResult,
+  PRInfo,
   PRState,
   PRPhase,
   AppSettings,
@@ -36,7 +37,8 @@ function migrate(db: Database.Database): void {
       owner TEXT NOT NULL,
       repo TEXT NOT NULL,
       bot_users TEXT NOT NULL DEFAULT '[]',
-      local_path TEXT
+      local_path TEXT,
+      skip_typecheck INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS comments (
@@ -77,6 +79,10 @@ function migrate(db: Database.Database): void {
       last_fixed_at TEXT,
       last_re_review_at TEXT,
       fix_results TEXT NOT NULL DEFAULT '[]',
+      mergeable TEXT,
+      merge_state_status TEXT,
+      head_ref_name TEXT,
+      base_ref_name TEXT,
       PRIMARY KEY (repo, pr_number)
     );
 
@@ -161,6 +167,15 @@ function migrate(db: Database.Database): void {
     // Column already exists
   }
 
+  for (const col of [
+    "mergeable TEXT",
+    "merge_state_status TEXT",
+    "head_ref_name TEXT",
+    "base_ref_name TEXT",
+  ]) {
+    try { db.exec(`ALTER TABLE prs ADD COLUMN ${col}`); } catch { /* exists */ }
+  }
+
   // Add replied_at column if missing
   try {
     db.exec("ALTER TABLE comments ADD COLUMN replied_at TEXT");
@@ -178,6 +193,12 @@ function migrate(db: Database.Database): void {
   // Add deleted_at column for soft delete
   try {
     db.exec("ALTER TABLE repos ADD COLUMN deleted_at TEXT");
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE repos ADD COLUMN skip_typecheck INTEGER NOT NULL DEFAULT 0");
   } catch {
     // Column already exists
   }
@@ -259,7 +280,7 @@ export function migrateFromJson(): void {
     const state = JSON.parse(raw);
 
     const insertRepo = db.prepare(
-      "INSERT OR IGNORE INTO repos (label, owner, repo, bot_users, local_path) VALUES (?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO repos (label, owner, repo, bot_users, local_path, skip_typecheck) VALUES (?, ?, ?, ?, ?, ?)",
     );
     const insertComment = db.prepare(`
       INSERT OR IGNORE INTO comments
@@ -276,7 +297,7 @@ export function migrateFromJson(): void {
     const tx = db.transaction(() => {
       // Repos
       for (const r of state.repos ?? []) {
-        insertRepo.run(r.label, r.owner, r.repo, JSON.stringify(r.botUsers), r.localPath ?? null);
+        insertRepo.run(r.label, r.owner, r.repo, JSON.stringify(r.botUsers), r.localPath ?? null, 0);
       }
 
       // Comments (state.json only has state, not full comment data — that's ok)
@@ -339,8 +360,15 @@ export function migrateFromJson(): void {
 
 export function getRepos(): RepoConfig[] {
   const rows = getDB()
-    .prepare("SELECT label, owner, repo, bot_users, local_path FROM repos WHERE deleted_at IS NULL")
-    .all() as Array<{ label: string; owner: string; repo: string; bot_users: string; local_path: string | null }>;
+    .prepare("SELECT label, owner, repo, bot_users, local_path, skip_typecheck FROM repos WHERE deleted_at IS NULL")
+    .all() as Array<{
+      label: string;
+      owner: string;
+      repo: string;
+      bot_users: string;
+      local_path: string | null;
+      skip_typecheck: number;
+    }>;
 
   return rows.map((r) => ({
     label: r.label,
@@ -348,13 +376,21 @@ export function getRepos(): RepoConfig[] {
     repo: r.repo,
     botUsers: JSON.parse(r.bot_users) as string[],
     ...(r.local_path ? { localPath: r.local_path } : {}),
+    skipTypecheck: Boolean(r.skip_typecheck),
   }));
 }
 
 export function getRepo(label: string): RepoConfig | null {
   const r = getDB()
-    .prepare("SELECT label, owner, repo, bot_users, local_path FROM repos WHERE label = ? AND deleted_at IS NULL")
-    .get(label) as { label: string; owner: string; repo: string; bot_users: string; local_path: string | null } | undefined;
+    .prepare("SELECT label, owner, repo, bot_users, local_path, skip_typecheck FROM repos WHERE label = ? AND deleted_at IS NULL")
+    .get(label) as {
+      label: string;
+      owner: string;
+      repo: string;
+      bot_users: string;
+      local_path: string | null;
+      skip_typecheck: number;
+    } | undefined;
 
   if (!r) return null;
   return {
@@ -363,6 +399,7 @@ export function getRepo(label: string): RepoConfig | null {
     repo: r.repo,
     botUsers: JSON.parse(r.bot_users) as string[],
     ...(r.local_path ? { localPath: r.local_path } : {}),
+    skipTypecheck: Boolean(r.skip_typecheck),
   };
 }
 
@@ -374,8 +411,15 @@ export function addRepo(owner: string, repo: string, localPath?: string): RepoCo
   // Check for soft-deleted repo and restore it
   const db = getDB();
   const deleted = db
-    .prepare("SELECT label, owner, repo, bot_users, local_path FROM repos WHERE label = ? AND deleted_at IS NOT NULL")
-    .get(label) as { label: string; owner: string; repo: string; bot_users: string; local_path: string | null } | undefined;
+    .prepare("SELECT label, owner, repo, bot_users, local_path, skip_typecheck FROM repos WHERE label = ? AND deleted_at IS NOT NULL")
+    .get(label) as {
+      label: string;
+      owner: string;
+      repo: string;
+      bot_users: string;
+      local_path: string | null;
+      skip_typecheck: number;
+    } | undefined;
 
   if (deleted) {
     db.prepare("UPDATE repos SET deleted_at = NULL, local_path = COALESCE(?, local_path) WHERE label = ?")
@@ -386,14 +430,15 @@ export function addRepo(owner: string, repo: string, localPath?: string): RepoCo
       label: deleted.label,
       botUsers: JSON.parse(deleted.bot_users) as string[],
       localPath: localPath ?? deleted.local_path ?? undefined,
+      skipTypecheck: Boolean(deleted.skip_typecheck),
     };
   }
 
   const botUsers = [...DEFAULT_BOT_USERS];
-  db.prepare("INSERT INTO repos (label, owner, repo, bot_users, local_path) VALUES (?, ?, ?, ?, ?)")
-    .run(label, owner, repo, JSON.stringify(botUsers), localPath ?? null);
+  db.prepare("INSERT INTO repos (label, owner, repo, bot_users, local_path, skip_typecheck) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(label, owner, repo, JSON.stringify(botUsers), localPath ?? null, 0);
 
-  return { owner, repo, label, botUsers, ...(localPath ? { localPath } : {}) };
+  return { owner, repo, label, botUsers, ...(localPath ? { localPath } : {}), skipTypecheck: false };
 }
 
 export function removeRepo(label: string): void {
@@ -414,9 +459,30 @@ export function hardRemoveRepo(label: string): void {
   tx();
 }
 
-export function updateRepoLocalPath(label: string, localPath: string | null): RepoConfig | null {
+export function updateRepoConfig(
+  label: string,
+  updates: { localPath?: string | null; skipTypecheck?: boolean },
+): RepoConfig | null {
   const db = getDB();
-  db.prepare("UPDATE repos SET local_path = ? WHERE label = ?").run(localPath, label);
+  const clauses: string[] = [];
+  const values: Array<string | number | null> = [];
+
+  if (updates.localPath !== undefined) {
+    clauses.push("local_path = ?");
+    values.push(updates.localPath);
+  }
+
+  if (updates.skipTypecheck !== undefined) {
+    clauses.push("skip_typecheck = ?");
+    values.push(updates.skipTypecheck ? 1 : 0);
+  }
+
+  if (clauses.length === 0) {
+    return getRepo(label);
+  }
+
+  values.push(label);
+  db.prepare(`UPDATE repos SET ${clauses.join(", ")} WHERE label = ?`).run(...values);
   return getRepo(label);
 }
 
@@ -785,21 +851,42 @@ export function getPRState(repo: string, prNumber: number): PRState | undefined 
     lastFixedAt: row.last_fixed_at as string | null,
     lastReReviewAt: row.last_re_review_at as string | null,
     fixResults: JSON.parse((row.fix_results as string) || "[]") as FixResult[],
+    mergeable: (row.mergeable as PRState["mergeable"]) ?? null,
+    mergeStateStatus: (row.merge_state_status as PRState["mergeStateStatus"]) ?? null,
+    headRefName: (row.head_ref_name as string | null) ?? null,
+    baseRefName: (row.base_ref_name as string | null) ?? null,
   };
 }
 
 export function upsertPRState(pr: PRState): void {
   getDB()
     .prepare(
-      `INSERT INTO prs (repo, pr_number, review_cycle, confidence_score, phase, last_fixed_at, last_re_review_at, fix_results)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO prs (
+         repo,
+         pr_number,
+         review_cycle,
+         confidence_score,
+         phase,
+         last_fixed_at,
+         last_re_review_at,
+         fix_results,
+         mergeable,
+         merge_state_status,
+         head_ref_name,
+         base_ref_name
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (repo, pr_number) DO UPDATE SET
          review_cycle = excluded.review_cycle,
          confidence_score = excluded.confidence_score,
          phase = excluded.phase,
          last_fixed_at = excluded.last_fixed_at,
          last_re_review_at = excluded.last_re_review_at,
-         fix_results = excluded.fix_results`,
+         fix_results = excluded.fix_results,
+         mergeable = excluded.mergeable,
+         merge_state_status = excluded.merge_state_status,
+         head_ref_name = excluded.head_ref_name,
+         base_ref_name = excluded.base_ref_name`,
     )
     .run(
       pr.repo,
@@ -810,7 +897,31 @@ export function upsertPRState(pr: PRState): void {
       pr.lastFixedAt,
       pr.lastReReviewAt,
       JSON.stringify(pr.fixResults),
+      pr.mergeable ?? null,
+      pr.mergeStateStatus ?? null,
+      pr.headRefName ?? null,
+      pr.baseRefName ?? null,
     );
+}
+
+export function syncPRStateMetadata(pr: PRInfo): PRState {
+  const current = getPRState(pr.repo, pr.number);
+  const nextState: PRState = {
+    repo: pr.repo,
+    prNumber: pr.number,
+    reviewCycle: current?.reviewCycle ?? 0,
+    confidenceScore: current?.confidenceScore ?? null,
+    phase: current?.phase ?? "polled",
+    lastFixedAt: current?.lastFixedAt ?? null,
+    lastReReviewAt: current?.lastReReviewAt ?? null,
+    fixResults: current?.fixResults ?? [],
+    mergeable: pr.mergeable ?? null,
+    mergeStateStatus: pr.mergeStateStatus ?? null,
+    headRefName: pr.headRefName,
+    baseRefName: pr.baseRefName,
+  };
+  upsertPRState(nextState);
+  return nextState;
 }
 
 // ------- Run History -------
@@ -1486,6 +1597,10 @@ export type TimelineEventType =
   | "fix_completed"
   | "fix_no_changes"
   | "fix_failed"
+  | "merge_conflict_resolution_started"
+  | "merge_conflict_resolved"
+  | "merge_conflict_up_to_date"
+  | "merge_conflict_resolution_failed"
   | "local_fix_started"
   | "local_fix_completed"
   | "local_fix_no_changes"

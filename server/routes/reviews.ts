@@ -795,6 +795,7 @@ router.post("/:repo/:prNumber/local-comments/fix", async (req, res) => {
         const currentPR = getPRState(repoLabel, prNumber);
         const newCycle = (currentPR?.reviewCycle ?? 0) + 1;
         upsertPRState({
+          ...currentPR,
           repo: repoLabel,
           prNumber,
           reviewCycle: newCycle,

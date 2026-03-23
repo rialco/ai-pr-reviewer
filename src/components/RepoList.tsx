@@ -4,6 +4,7 @@ import { useRemoveRepo, useRepos, useSyncRepo, useUpdateRepo } from "../hooks/us
 import { RepoDirectoryBrowser } from "./RepoDirectoryBrowser";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
+import { Switch } from "./ui/switch";
 
 export function RepoList() {
   const { data: repos } = useRepos();
@@ -54,6 +55,23 @@ export function RepoList() {
                     >
                       {repo.localPath ?? "No local path"}
                     </p>
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <Switch
+                        size="sm"
+                        checked={Boolean(repo.skipTypecheck)}
+                        onClick={() =>
+                          updateRepo.mutate({
+                            label: repo.label,
+                            skipTypecheck: !repo.skipTypecheck,
+                          })
+                        }
+                        aria-label={`Skip typecheck for ${repo.label}`}
+                        title="Skip repo typecheck/check script during fixes"
+                      />
+                      <span className="text-[11px] leading-4 text-muted-foreground">
+                        Skip typecheck/check
+                      </span>
+                    </div>
                   </div>
 
                   <div className="flex shrink-0 items-center gap-0.5 pl-1">

@@ -26,6 +26,7 @@ import {
   updateTimelineEventDebug,
   getCoordinatorPRPreference,
   updateCoordinatorPRPreference,
+  syncPRStateMetadata,
 } from "../services/db.js";
 import {
   listOpenPRs,
@@ -46,6 +47,7 @@ import {
   getFixHistory,
   getWorkDir,
   isFixerAgentAvailable,
+  resolveMergeConflict,
   type FixerAgent,
 } from "../services/fixer.js";
 import { pollPR, syncRepo } from "../services/poller.js";
@@ -138,6 +140,20 @@ router.get("/:repo/:prNumber/overview", async (req, res) => {
     return;
   }
 
+  syncPRStateMetadata({
+    number: overview.number,
+    title: overview.title,
+    url: overview.url,
+    headRefName: overview.headRefName,
+    baseRefName: overview.baseRefName,
+    mergeable: overview.mergeable,
+    mergeStateStatus: overview.mergeStateStatus,
+    author: overview.author,
+    repo: repoLabel,
+    createdAt: overview.createdAt,
+    updatedAt: overview.updatedAt,
+  });
+
   res.json(overview);
 });
 
@@ -173,6 +189,7 @@ router.post("/:repo/:prNumber/refresh", async (req, res) => {
     res.status(404).json({ error: "PR not found or not open" });
     return;
   }
+  syncPRStateMetadata(pr);
 
   const { newCount } = await pollPR(repoLabel, prNumber, pr.title, pr.url);
   if (newCount > 0) {
@@ -406,6 +423,7 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
     res.status(404).json({ error: "PR not found" });
     return;
   }
+  syncPRStateMetadata(pr);
 
   const { commentIds, requestReReview, fixerAgent: requestedFixerAgent } = (req.body ?? {}) as {
     commentIds?: number[];
@@ -443,6 +461,7 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
   // Update PR state
   const existingPR = getPRState(repoLabel, prNumber);
   upsertPRState({
+    ...existingPR,
     repo: repoLabel,
     prNumber,
     reviewCycle: existingPR?.reviewCycle ?? 0,
@@ -505,6 +524,7 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
         const currentPR = getPRState(repoLabel, prNumber);
         const newCycle = (currentPR?.reviewCycle ?? 0) + 1;
         upsertPRState({
+          ...currentPR,
           repo: repoLabel,
           prNumber,
           reviewCycle: newCycle,
@@ -538,7 +558,7 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
           fixerAgent,
         });
       }
-    })
+  })
     .catch((err) => {
       console.error("Fix failed:", err);
       for (const c of fixable) {
@@ -551,6 +571,151 @@ router.post("/:repo/:prNumber/fix", async (req, res) => {
       recordTimelineEvent(repoLabel, prNumber, "fix_failed", {
         error: String(err),
         commentCount: fixable.length,
+        fixerAgent,
+      });
+    });
+});
+
+router.post("/:repo/:prNumber/resolve-conflicts", async (req, res) => {
+  const repoLabel = decodeURIComponent(req.params.repo);
+  const prNumber = parseInt(req.params.prNumber, 10);
+
+  const repo = getRepo(repoLabel);
+  if (!repo) {
+    res.status(404).json({ error: "Repo not configured" });
+    return;
+  }
+
+  const prs = await listOpenPRs(repo);
+  const pr = prs.find((candidate) => candidate.number === prNumber);
+  if (!pr) {
+    res.status(404).json({ error: "PR not found" });
+    return;
+  }
+  syncPRStateMetadata(pr);
+
+  const { fixerAgent: requestedFixerAgent } = (req.body ?? {}) as {
+    fixerAgent?: FixerAgent;
+  };
+  const settings = getSettings();
+  const fixerAgent = requestedFixerAgent === "codex" || requestedFixerAgent === "claude"
+    ? requestedFixerAgent
+    : settings.defaultFixerAgent;
+
+  if (!isFixerAgentAvailable(fixerAgent)) {
+    res.status(400).json({ error: `${fixerAgent} CLI is not available` });
+    return;
+  }
+
+  const existingPR = getPRState(repoLabel, prNumber);
+  const previousPhase = existingPR?.phase ?? "polled";
+  upsertPRState({
+    repo: repoLabel,
+    prNumber,
+    reviewCycle: existingPR?.reviewCycle ?? 0,
+    confidenceScore: existingPR?.confidenceScore ?? null,
+    phase: "fixing",
+    lastFixedAt: existingPR?.lastFixedAt ?? null,
+    lastReReviewAt: existingPR?.lastReReviewAt ?? null,
+    fixResults: existingPR?.fixResults ?? [],
+    mergeable: pr.mergeable,
+    mergeStateStatus: pr.mergeStateStatus,
+    headRefName: pr.headRefName,
+    baseRefName: pr.baseRefName,
+  });
+
+  const mergeConflictEventId = recordTimelineEvent(
+    repoLabel,
+    prNumber,
+    "merge_conflict_resolution_started",
+    {
+      fixerAgent,
+      branch: pr.headRefName,
+      baseBranch: pr.baseRefName,
+      mergeable: pr.mergeable,
+      mergeStateStatus: pr.mergeStateStatus,
+    },
+    {
+      fixerAgent,
+      repo: repoLabel,
+      prNumber,
+      prTitle: pr.title,
+      branch: pr.headRefName,
+      baseBranch: pr.baseRefName,
+      mergeable: pr.mergeable,
+      mergeStateStatus: pr.mergeStateStatus,
+    },
+  );
+
+  res.status(202).json({ resolving: true });
+
+  resolveMergeConflict({
+    fixerAgent,
+    repo,
+    branch: pr.headRefName,
+    baseBranch: pr.baseRefName,
+    prNumber,
+    prTitle: pr.title,
+    mergeStateStatus: pr.mergeStateStatus,
+    onDebug: (debugDetail) => {
+      updateTimelineEventDebug(mergeConflictEventId, debugDetail);
+    },
+    onHistoryUpdate: (history) => {
+      updateTimelineEventDebug(mergeConflictEventId, { history });
+    },
+  })
+    .then((result) => {
+      if (!result) {
+        const currentPR = getPRState(repoLabel, prNumber);
+        if (currentPR) {
+          upsertPRState({ ...currentPR, phase: previousPhase });
+        }
+        recordTimelineEvent(repoLabel, prNumber, "merge_conflict_up_to_date", {
+          branch: pr.headRefName,
+          baseBranch: pr.baseRefName,
+          fixerAgent,
+        });
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const currentPR = getPRState(repoLabel, prNumber);
+      const newCycle = (currentPR?.reviewCycle ?? 0) + 1;
+      upsertPRState({
+        ...currentPR,
+        repo: repoLabel,
+        prNumber,
+        reviewCycle: newCycle,
+        confidenceScore: currentPR?.confidenceScore ?? null,
+        phase: "fixed",
+        lastFixedAt: now,
+        lastReReviewAt: currentPR?.lastReReviewAt ?? null,
+        fixResults: currentPR?.fixResults ?? [],
+        mergeable: currentPR?.mergeable ?? pr.mergeable,
+        mergeStateStatus: currentPR?.mergeStateStatus ?? pr.mergeStateStatus,
+        headRefName: currentPR?.headRefName ?? pr.headRefName,
+        baseRefName: currentPR?.baseRefName ?? pr.baseRefName,
+      });
+
+      recordTimelineEvent(repoLabel, prNumber, "merge_conflict_resolved", {
+        commitHash: result.commitHash,
+        filesChanged: result.filesChanged,
+        cycle: newCycle,
+        branch: pr.headRefName,
+        baseBranch: pr.baseRefName,
+        fixerAgent,
+      });
+    })
+    .catch((err) => {
+      console.error("Merge conflict resolution failed:", err);
+      const currentPR = getPRState(repoLabel, prNumber);
+      if (currentPR) {
+        upsertPRState({ ...currentPR, phase: previousPhase });
+      }
+      recordTimelineEvent(repoLabel, prNumber, "merge_conflict_resolution_failed", {
+        error: String(err),
+        branch: pr.headRefName,
+        baseBranch: pr.baseRefName,
         fixerAgent,
       });
     });
@@ -668,9 +833,21 @@ router.post("/:repo/:prNumber/reply", async (req, res) => {
 // with reviewerId: "greptile" (or "claude", "codex").
 
 // Get PR lifecycle status
-router.get("/:repo/:prNumber/status", (req, res) => {
+router.get("/:repo/:prNumber/status", async (req, res) => {
   const repoLabel = decodeURIComponent(req.params.repo);
   const prNumber = parseInt(req.params.prNumber, 10);
+
+  const repo = getRepo(repoLabel);
+  if (!repo) {
+    res.status(404).json({ error: "Repo not configured" });
+    return;
+  }
+
+  const prs = await listOpenPRs(repo);
+  const pr = prs.find((candidate) => candidate.number === prNumber);
+  if (pr) {
+    syncPRStateMetadata(pr);
+  }
 
   const prState = getPRState(repoLabel, prNumber);
   const fixableCount = getFixableCount(repoLabel, prNumber);
@@ -680,7 +857,12 @@ router.get("/:repo/:prNumber/status", (req, res) => {
   // The old prs.confidence_score column is no longer the source of truth.
 
   const fixProgress = getFixProgress(repoLabel, prNumber);
-  const phase = nextStep.action === "merge_ready" ? "merge_ready" : (prState?.phase ?? "polled");
+  const phase =
+    nextStep.action === "merge_ready"
+      ? "merge_ready"
+      : nextStep.action === "resolve_merge_conflict"
+        ? "blocked"
+        : (prState?.phase ?? "polled");
 
   // Clear fix progress once the fix is no longer in progress
   if (fixProgress && phase !== "fixing") {
@@ -705,6 +887,12 @@ router.get("/:repo/:prNumber/status", (req, res) => {
     lastFixedAt: prState?.lastFixedAt ?? null,
     lastReReviewAt: prState?.lastReReviewAt ?? null,
     fixResults: prState?.fixResults ?? [],
+    mergeable: prState?.mergeable ?? pr?.mergeable ?? null,
+    mergeStateStatus: prState?.mergeStateStatus ?? pr?.mergeStateStatus ?? null,
+    headRefName: prState?.headRefName ?? pr?.headRefName ?? null,
+    baseRefName: prState?.baseRefName ?? pr?.baseRefName ?? null,
+    needsConflictResolution: nextStep.action === "resolve_merge_conflict",
+    blockedReason: nextStep.action === "resolve_merge_conflict" ? nextStep.description : null,
     fixableCount,
     fixProgress: fixProgress ?? null,
     fixHistory: getFixHistory(repoLabel, prNumber),
@@ -734,9 +922,21 @@ router.get("/:repo/:prNumber/timeline/:eventId", (req, res) => {
   res.json(event);
 });
 
-router.get("/:repo/:prNumber/next-step", (req, res) => {
+router.get("/:repo/:prNumber/next-step", async (req, res) => {
   const repoLabel = decodeURIComponent(req.params.repo);
   const prNumber = parseInt(req.params.prNumber, 10);
+
+  const repo = getRepo(repoLabel);
+  if (!repo) {
+    res.status(404).json({ error: "Repo not configured" });
+    return;
+  }
+
+  const prs = await listOpenPRs(repo);
+  const pr = prs.find((candidate) => candidate.number === prNumber);
+  if (pr) {
+    syncPRStateMetadata(pr);
+  }
 
   res.json(getSuggestedNextStep(repoLabel, prNumber));
 });
@@ -744,6 +944,18 @@ router.get("/:repo/:prNumber/next-step", (req, res) => {
 router.post("/:repo/:prNumber/next-step/execute", async (req, res) => {
   const repoLabel = decodeURIComponent(req.params.repo);
   const prNumber = parseInt(req.params.prNumber, 10);
+
+  const repo = getRepo(repoLabel);
+  if (!repo) {
+    res.status(404).json({ error: "Repo not configured" });
+    return;
+  }
+
+  const prs = await listOpenPRs(repo);
+  const pr = prs.find((candidate) => candidate.number === prNumber);
+  if (pr) {
+    syncPRStateMetadata(pr);
+  }
 
   const step = await executeSuggestedNextStep(repoLabel, prNumber);
   res.json({ executed: step.canExecute && step.action !== "busy" && step.action !== "idle", step });

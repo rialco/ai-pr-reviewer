@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { execSync } from "child_process";
-import { getRepos, addRepo, removeRepo, hardRemoveRepo, updateRepoLocalPath, getSettings, updateSettings } from "../services/db.js";
+import { getRepos, addRepo, removeRepo, hardRemoveRepo, updateRepoConfig, getSettings, updateSettings } from "../services/db.js";
 import type { AppSettings } from "../types.js";
 
 const router = Router();
@@ -35,8 +35,11 @@ router.patch("/settings", (req, res) => {
 
 router.patch("/:label", (req, res) => {
   const label = decodeURIComponent(req.params.label);
-  const { localPath } = req.body as { localPath?: string | null };
-  const updated = updateRepoLocalPath(label, localPath ?? null);
+  const { localPath, skipTypecheck } = req.body as { localPath?: string | null; skipTypecheck?: boolean };
+  const updated = updateRepoConfig(label, {
+    ...(localPath !== undefined ? { localPath: localPath ?? null } : {}),
+    ...(skipTypecheck !== undefined ? { skipTypecheck } : {}),
+  });
   if (!updated) {
     res.status(404).json({ error: "Repo not found" });
     return;
