@@ -734,6 +734,11 @@ async function runCoordinatorPass(
         break;
       }
 
+      if (pr.coordinatorReadyAt && pr.coordinatorReadyAt > now) {
+        addSkipReason(skippedReasons, "pr_visibility_grace_period");
+        continue;
+      }
+
       const repo = repoById.get(pr.repoId);
       if (!repo) {
         addSkipReason(skippedReasons, "repo_missing");

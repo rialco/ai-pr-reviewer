@@ -1,11 +1,25 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { GitBranch, Loader2, RefreshCw, Trash2 } from "lucide-react";
+import { FolderOpen, GitBranch, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
+
+function machineStatusTone(status: string) {
+  if (status === "busy") {
+    return "bg-amber-400";
+  }
+  if (status === "error") {
+    return "bg-destructive";
+  }
+  if (status === "offline") {
+    return "bg-zinc-500";
+  }
+  return "bg-emerald-400";
+}
+
 export function RepoList() {
   const { activeWorkspaceId } = useActiveWorkspace();
   const repos = useQuery(
@@ -45,11 +59,11 @@ export function RepoList() {
 
   return (
     <>
-      <div className="space-y-2">
+      <div className="space-y-1.5">
         {groupedRepos.map(({ repo, configs }) => (
-          <div key={repo._id} className="rounded-xl border border-border/70 bg-muted/10 px-2.5 py-2.5">
-            <div className="flex items-start gap-2">
-              <GitBranch className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <div key={repo._id} className="rounded-xl border border-border/70 bg-muted/10 px-2.5 py-2">
+            <div className="flex items-center gap-2">
+              <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <p className="truncate text-sm font-semibold leading-tight text-foreground">
@@ -59,9 +73,6 @@ export function RepoList() {
                     {configs.length} checkout{configs.length === 1 ? "" : "s"}
                   </span>
                 </div>
-                <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-                  Workspace repo routed through linked machine checkouts.
-                </p>
               </div>
               <Button
                 variant="ghost"
@@ -75,7 +86,7 @@ export function RepoList() {
             </div>
 
             {configs.length > 0 ? (
-              <div className="mt-2 space-y-2 border-t border-border/60 pt-2">
+              <div className="mt-1.5 space-y-1 border-t border-border/60 pt-1.5">
                 {configs.map((config) => {
                   const syncKey = `${config.repoId}:${config.machineSlug}`;
                   const isSyncing = syncingKey === syncKey;
@@ -83,20 +94,30 @@ export function RepoList() {
                   return (
                     <div
                       key={config._id}
-                      className="rounded-lg border border-border/60 bg-background/40 px-3 py-2"
+                      className="flex items-center gap-2 rounded-lg border border-border/60 bg-background/40 px-2.5 py-1.5"
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground/80">
-                            {config.machineName}
-                          </p>
-                          <p className="mt-1 text-[11px] text-muted-foreground">
-                            {config.machineSlug} · {config.machineStatus}
-                          </p>
-                          <p className="mt-1 truncate text-[11px] text-muted-foreground" title={config.localPath}>
-                            {config.localPath}
-                          </p>
-                        </div>
+                      <span
+                        className={`h-2 w-2 shrink-0 rounded-full ${machineStatusTone(config.machineStatus)}`}
+                        title={config.machineStatus}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[12px] font-medium text-foreground">
+                          {config.machineName}
+                        </p>
+                      </div>
+                      <span className="shrink-0 rounded-full border border-border/70 bg-muted/20 px-1.5 py-0.5 text-[10px] capitalize text-muted-foreground">
+                        {config.machineStatus}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6.5 w-6.5 rounded-md"
+                        title={config.localPath}
+                        aria-label={`Checkout path for ${config.machineName}`}
+                      >
+                        <FolderOpen className="h-3 w-3 text-muted-foreground" />
+                      </Button>
+                      <div className="shrink-0">
                         <Button
                           variant="ghost"
                           size="icon"
@@ -125,7 +146,7 @@ export function RepoList() {
                 })}
               </div>
             ) : (
-              <p className="mt-2 text-[11px] text-muted-foreground">
+              <p className="mt-1.5 text-[11px] text-muted-foreground">
                 No machine checkout is registered for this workspace repo yet.
               </p>
             )}

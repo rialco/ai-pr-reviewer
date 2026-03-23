@@ -190,6 +190,7 @@ export default defineSchema({
         }),
       ),
     ),
+    coordinatorReadyAt: v.optional(v.string()),
     lastFixedAt: v.optional(v.string()),
     lastReReviewAt: v.optional(v.string()),
     createdAt: v.string(),

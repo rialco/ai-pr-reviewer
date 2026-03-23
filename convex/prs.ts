@@ -5,6 +5,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { nowIso, requireWorkspaceAccess } from "./lib/auth";
 import { requireMachineByToken } from "./lib/machineAuth";
 
+const NEW_PR_COORDINATOR_GRACE_MS = 60_000;
+
 function normalizeCommentStatus(status: string | undefined) {
   return status ?? "new";
 }
@@ -65,6 +67,7 @@ async function upsertPrSnapshot(
   },
 ) {
   const { workspaceId, repo, machineSlug, incomingPr, eventType } = params;
+  const now = nowIso();
   const existing = await ctx.db
     .query("prs")
     .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", incomingPr.number))
@@ -91,6 +94,9 @@ async function upsertPrSnapshot(
     changedFiles: incomingPr.changedFiles,
     commitCount: incomingPr.commitCount,
     files: incomingPr.files,
+    coordinatorReadyAt:
+      existing?.coordinatorReadyAt ??
+      new Date(Date.now() + NEW_PR_COORDINATOR_GRACE_MS).toISOString(),
     lastFixedAt: existing?.lastFixedAt,
     lastReReviewAt: existing?.lastReReviewAt,
     updatedAt: incomingPr.updatedAt,
@@ -174,7 +180,7 @@ async function upsertPrSnapshot(
         commentCount: incomingComments.length,
         changedFiles: incomingPr.changedFiles ?? 0,
       },
-      createdAt: nowIso(),
+      createdAt: now,
     });
   }
 

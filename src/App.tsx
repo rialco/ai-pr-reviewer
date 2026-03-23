@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AddRepo } from "./components/AddRepo";
 import { AppActivityCenter } from "./components/AppActivityCenter";
 import { AppCommentPanel } from "./components/AppCommentPanel";
@@ -11,14 +11,43 @@ import { useAppSummary } from "./hooks/useAppSummary";
 import { cn } from "./lib/utils";
 import { ChevronDown, ChevronRight, Github, MessageSquare } from "lucide-react";
 
+function readSelectedPrFromLocation() {
+  const params = new URLSearchParams(window.location.search);
+  const repo = params.get("repo");
+  const prValue = params.get("pr");
+  const prNumber = prValue ? Number(prValue) : Number.NaN;
+
+  if (!repo || !Number.isInteger(prNumber) || prNumber <= 0) {
+    return null;
+  }
+
+  return { repo, prNumber };
+}
+
 export function App() {
   const [selectedPR, setSelectedPR] = useState<{
     repo: string;
     prNumber: number;
-  } | null>(null);
+  } | null>(() => readSelectedPrFromLocation());
   const [footerPopover, setFooterPopover] = useState<"activity" | "coordinator" | "cloud" | null>(null);
   const [reposCollapsed, setReposCollapsed] = useState(false);
   const summary = useAppSummary();
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+
+    if (selectedPR) {
+      params.set("repo", selectedPR.repo);
+      params.set("pr", String(selectedPR.prNumber));
+    } else {
+      params.delete("repo");
+      params.delete("pr");
+    }
+
+    const nextSearch = params.toString();
+    const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
+    window.history.replaceState(null, "", nextUrl);
+  }, [selectedPR]);
 
   return (
     <div className="flex h-full">
