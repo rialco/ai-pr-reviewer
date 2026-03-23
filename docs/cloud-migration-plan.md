@@ -95,13 +95,14 @@ This branch intentionally keeps the existing Express app usable while the cloud 
 That means:
 
 - The old local REST workflow still exists.
-- The new Convex data model is present but not initialized in a deployment yet.
-- Worker enrollment and secure machine auth are still pending.
+- The new Convex data model runs in parallel as the cloud control plane.
+- Worker enrollment and heartbeat reporting are implemented.
+- The first machine-scoped cloud job is a safe self-check used to validate claim and completion flow.
 
 ## Immediate Next Steps
 
-1. Create or link a Convex deployment with `pnpm convex:dev`.
-2. Configure Clerk and set the values from `.env.example`, especially `CLERK_FRONTEND_API_URL`.
-3. Generate `convex/_generated`.
-4. Replace generic Convex wrappers with generated ones.
-5. Wire the signed-in UI to `bootstrap.viewer`, `workspaces.listForCurrentUser`, and workspace repo queries.
+1. Run a worker with `WORKER_ENROLLMENT_TOKEN=... pnpm dev:worker`.
+2. Confirm the machine appears in the cloud popover and heartbeats update.
+3. Queue a machine self-check from the cloud popover and verify it moves from `queued` to `running` to `done`.
+4. Extend the machine job payloads from self-check to real local actions like repo sync and PR refresh.
+5. Start migrating selected REST-backed UI reads to Convex subscriptions.

@@ -31,8 +31,13 @@ function CloudStatusCard() {
   const [open, setOpen] = useState(false);
   const createEnrollmentToken = useMutation(api.machines.createEnrollmentToken);
   const revokeEnrollmentToken = useMutation(api.machines.revokeEnrollmentToken);
+  const enqueueMachineSelfCheck = useMutation(api.jobs.enqueueMachineSelfCheck);
   const machines = useQuery(
     api.machines.listForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+  );
+  const jobs = useQuery(
+    api.jobs.listForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
   );
   const enrollmentTokens = useQuery(
@@ -45,9 +50,9 @@ function CloudStatusCard() {
   }
 
   const latestToken = enrollmentTokens?.[0];
+  const recentMachineJobs = (jobs ?? []).filter((job) => job.kind === "machine_command").slice(0, 4);
   const workerSnippet = latestToken
     ? [
-        `WORKER_WORKSPACE_ID=${activeWorkspaceId}`,
         `WORKER_ENROLLMENT_TOKEN=${latestToken.token}`,
         "pnpm dev:worker",
       ].join(" \\\n  ")
@@ -67,6 +72,14 @@ function CloudStatusCard() {
     await navigator.clipboard.writeText(workerSnippet);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
+  };
+
+  const handleEnqueueSelfCheck = async (machineSlug: string) => {
+    if (!activeWorkspaceId) return;
+    await enqueueMachineSelfCheck({
+      workspaceId: activeWorkspaceId,
+      machineSlug,
+    });
   };
 
   return (
@@ -123,6 +136,55 @@ function CloudStatusCard() {
               </div>
               <p className="text-lg font-semibold text-foreground">{machines?.length ?? 0}</p>
             </div>
+          </div>
+
+          <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">
+                  Linked Machines
+                </p>
+                <p className="mt-1 text-xs leading-5">
+                  Use a self-check job to verify the claim, execute, and completion loop from the
+                  cloud control plane.
+                </p>
+              </div>
+            </div>
+
+            {machines && machines.length > 0 ? (
+              <div className="space-y-2">
+                {machines.map((machine) => (
+                  <div
+                    key={machine._id}
+                    className="rounded-md border border-border/70 bg-card/80 px-3 py-2"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-foreground">{machine.name}</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {machine.slug} · {machine.status} · {machine.platform ?? "unknown platform"}
+                        </p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          Last heartbeat {new Date(machine.lastHeartbeatAt).toLocaleString()}
+                        </p>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={machine.status === "busy"}
+                        onClick={() => void handleEnqueueSelfCheck(machine.slug)}
+                      >
+                        Self-check
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs leading-5 text-muted-foreground">
+                No linked machines yet. Enroll a worker first, then queue a self-check here.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
@@ -188,6 +250,42 @@ function CloudStatusCard() {
             ) : (
               <p className="text-xs leading-5 text-muted-foreground">
                 No active enrollment token yet. Create one when you are ready to attach a worker.
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">
+                Recent Machine Jobs
+              </p>
+              <p className="mt-1 text-xs leading-5">
+                Latest machine-scoped jobs from this workspace.
+              </p>
+            </div>
+
+            {recentMachineJobs.length > 0 ? (
+              <div className="space-y-2">
+                {recentMachineJobs.map((job) => (
+                  <div key={job._id} className="rounded-md border border-border/70 bg-card/80 px-3 py-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-foreground">{job.title}</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {job.targetMachineSlug ?? "any machine"} · {job.status} ·{" "}
+                          {new Date(job.updatedAt).toLocaleString()}
+                        </p>
+                        {job.errorMessage ? (
+                          <p className="mt-1 text-[11px] text-destructive">{job.errorMessage}</p>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs leading-5 text-muted-foreground">
+                No machine jobs yet. Queue a self-check on any linked machine to validate the loop.
               </p>
             )}
           </div>

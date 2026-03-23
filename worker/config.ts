@@ -6,27 +6,19 @@ loadDotenv({ path: path.resolve(process.cwd(), ".env.local"), override: false })
 
 export interface WorkerConfig {
   convexUrl: string;
-  workspaceId: string;
   machineName: string;
   machineSlug: string;
   enrollmentToken?: string;
   version: string;
   sessionPath: string;
   heartbeatIntervalMs: number;
+  jobPollIntervalMs: number;
 }
 
 export interface WorkerSession {
   machineId: string;
   machineToken: string;
   workspaceId: string;
-}
-
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is required to start the worker scaffold.`);
-  }
-  return value;
 }
 
 function requireFirstEnv(names: string[]): string {
@@ -43,13 +35,13 @@ function requireFirstEnv(names: string[]): string {
 export function loadWorkerConfig(): WorkerConfig {
   return {
     convexUrl: requireFirstEnv(["CONVEX_URL", "VITE_CONVEX_URL"]),
-    workspaceId: requireEnv("WORKER_WORKSPACE_ID"),
     machineName: process.env.WORKER_MACHINE_NAME ?? "Unnamed Machine",
     machineSlug: process.env.WORKER_MACHINE_SLUG ?? "unnamed-machine",
     enrollmentToken: process.env.WORKER_ENROLLMENT_TOKEN,
     version: "0.1.0",
     sessionPath: path.resolve(process.cwd(), "worker/.machine-session.json"),
     heartbeatIntervalMs: Number(process.env.WORKER_HEARTBEAT_MS ?? "30000"),
+    jobPollIntervalMs: Number(process.env.WORKER_JOB_POLL_MS ?? "5000"),
   };
 }
 

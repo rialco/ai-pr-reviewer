@@ -11,6 +11,7 @@
 import type * as bootstrap from "../bootstrap.js";
 import type * as jobs from "../jobs.js";
 import type * as lib_auth from "../lib/auth.js";
+import type * as lib_machineAuth from "../lib/machineAuth.js";
 import type * as machines from "../machines.js";
 import type * as repos from "../repos.js";
 import type * as workspaces from "../workspaces.js";
@@ -25,6 +26,7 @@ declare const fullApi: ApiFromModules<{
   bootstrap: typeof bootstrap;
   jobs: typeof jobs;
   "lib/auth": typeof lib_auth;
+  "lib/machineAuth": typeof lib_machineAuth;
   machines: typeof machines;
   repos: typeof repos;
   workspaces: typeof workspaces;

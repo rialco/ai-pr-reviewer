@@ -1,6 +1,7 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { nowIso, requireWorkspaceAccess } from "./lib/auth";
+import { requireMachineByToken } from "./lib/machineAuth";
 
 function makeSecretToken(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
@@ -208,15 +209,7 @@ export const heartbeat = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const machine = await ctx.db
-      .query("machines")
-      .withIndex("by_authToken", (q) => q.eq("authToken", args.machineToken))
-      .unique();
-
-    if (!machine) {
-      throw new Error("Machine token is invalid.");
-    }
-
+    const machine = await requireMachineByToken(ctx, args.machineToken);
     const now = nowIso();
     await ctx.db.patch(machine._id, {
       status: args.status,
