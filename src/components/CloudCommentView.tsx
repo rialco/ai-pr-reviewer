@@ -1498,16 +1498,6 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                       <RefreshCw className="h-3.5 w-3.5" />
                       Refresh PR
                     </Button>
-                    {selectedMachineRecord?.capabilities.claude ? (
-                      <Button variant="outline" size="sm" disabled={!selectedMachineSlug} onClick={() => void handleRequestReview("claude")}>
-                        <AgentInlineLabel agent="claude" prefix="Review with" />
-                      </Button>
-                    ) : null}
-                    {selectedMachineRecord?.capabilities.codex ? (
-                      <Button variant="outline" size="sm" disabled={!selectedMachineSlug} onClick={() => void handleRequestReview("codex")}>
-                        <AgentInlineLabel agent="codex" prefix="Review with" />
-                      </Button>
-                    ) : null}
                   </>
                 ) : null}
                 <Button variant="destructive" size="sm" onClick={() => setResetDialogOpen(true)}>
