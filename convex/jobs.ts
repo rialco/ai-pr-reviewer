@@ -1,8 +1,8 @@
-import { mutationGeneric, queryGeneric } from "convex/server";
+import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { nowIso, requireWorkspaceAccess } from "./lib/auth";
 
-export const listForWorkspace = queryGeneric({
+export const listForWorkspace = query({
   args: {
     workspaceId: v.id("workspaces"),
   },
@@ -18,7 +18,7 @@ export const listForWorkspace = queryGeneric({
   },
 });
 
-export const enqueue = mutationGeneric({
+export const enqueue = mutation({
   args: {
     workspaceId: v.id("workspaces"),
     repoId: v.optional(v.id("repos")),

@@ -1,4 +1,6 @@
+import type { QueryCtx, MutationCtx } from "../_generated/server";
 import type { UserIdentity } from "convex/server";
+import type { Id } from "../_generated/dataModel";
 
 export function nowIso(): string {
   return new Date().toISOString();
@@ -30,7 +32,7 @@ export function workspaceSlugFromIdentity(identity: UserIdentity): string {
   return slugify(base) || "workspace";
 }
 
-export async function requireIdentity(ctx: any): Promise<UserIdentity> {
+export async function requireIdentity(ctx: QueryCtx | MutationCtx): Promise<UserIdentity> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
     throw new Error("Unauthenticated");
@@ -38,23 +40,26 @@ export async function requireIdentity(ctx: any): Promise<UserIdentity> {
   return identity;
 }
 
-export async function requireWorkspaceAccess(ctx: any, workspaceId: any) {
+export async function requireWorkspaceAccess(
+  ctx: QueryCtx | MutationCtx,
+  workspaceId: Id<"workspaces">,
+) {
   const identity = await requireIdentity(ctx);
   const user = await ctx.db
     .query("users")
-    .withIndex("by_tokenIdentifier", (q: any) => q.eq("tokenIdentifier", identity.tokenIdentifier))
+    .withIndex("by_tokenIdentifier", (q) => q.eq("tokenIdentifier", identity.tokenIdentifier))
     .unique();
 
   if (!user) {
     throw new Error("Current user is not initialized in Convex.");
   }
 
-  const memberships = await ctx.db
+  const membership = await ctx.db
     .query("workspaceMembers")
-    .withIndex("by_workspaceId", (q: any) => q.eq("workspaceId", workspaceId))
-    .collect();
-
-  const membership = memberships.find((entry: any) => entry.userId === user._id);
+    .withIndex("by_workspaceId_userId", (q) =>
+      q.eq("workspaceId", workspaceId).eq("userId", user._id),
+    )
+    .unique();
 
   if (!membership) {
     throw new Error("Forbidden");

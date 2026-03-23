@@ -1,7 +1,7 @@
-import { queryGeneric } from "convex/server";
+import { query } from "./_generated/server";
 import { requireIdentity } from "./lib/auth";
 
-export const listForCurrentUser = queryGeneric({
+export const listForCurrentUser = query({
   args: {},
   handler: async (ctx) => {
     const identity = await requireIdentity(ctx);

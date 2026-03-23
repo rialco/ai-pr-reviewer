@@ -1,8 +1,8 @@
-import { queryGeneric } from "convex/server";
+import { query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireWorkspaceAccess } from "./lib/auth";
 
-export const listForWorkspace = queryGeneric({
+export const listForWorkspace = query({
   args: {
     workspaceId: v.id("workspaces"),
   },

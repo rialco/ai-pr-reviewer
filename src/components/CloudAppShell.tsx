@@ -1,14 +1,94 @@
 import { SignInButton, UserButton } from "@clerk/react";
-import { Authenticated, AuthLoading, Unauthenticated } from "convex/react";
-import { Cloud, LaptopMinimalCheck, ShieldCheck } from "lucide-react";
+import { Authenticated, AuthLoading, Unauthenticated, useMutation, useQuery } from "convex/react";
+import { Cloud, LaptopMinimalCheck, ShieldCheck, ServerCog, Users } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { App } from "@/App";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { hasCloudEnv, missingCloudEnv } from "@/lib/cloud";
+import { api } from "../../convex/_generated/api";
+
+function CloudBootstrap() {
+  const ensureCurrentUser = useMutation(api.bootstrap.ensureCurrentUser);
+  const hasBootstrappedRef = useRef(false);
+
+  useEffect(() => {
+    if (hasBootstrappedRef.current) return;
+    hasBootstrappedRef.current = true;
+    void ensureCurrentUser();
+  }, [ensureCurrentUser]);
+
+  return null;
+}
+
+function CloudStatusCard() {
+  const viewer = useQuery(api.bootstrap.viewer);
+  const workspaces = useQuery(api.workspaces.listForCurrentUser);
+  const activeWorkspaceId = workspaces?.[0]?._id;
+  const machines = useQuery(
+    api.machines.listForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+  );
+
+  if (!viewer || !viewer.user) {
+    return null;
+  }
+
+  return (
+    <div className="pointer-events-none absolute left-3 top-3 z-50 max-w-sm">
+      <Card className="pointer-events-auto border-primary/20 bg-card/92 shadow-2xl backdrop-blur">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2 text-primary">
+            <ServerCog className="h-4 w-4" />
+            <CardTitle>Cloud Control Plane</CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm text-muted-foreground">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">
+              Signed In As
+            </p>
+            <p>{viewer.user.name ?? viewer.user.email ?? viewer.identity.subject}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-border/70 bg-background/50 p-3">
+              <div className="mb-1 flex items-center gap-2 text-foreground/80">
+                <Users className="h-3.5 w-3.5" />
+                <span className="text-[11px] font-semibold uppercase tracking-[0.18em]">
+                  Workspaces
+                </span>
+              </div>
+              <p className="text-lg font-semibold text-foreground">
+                {workspaces?.length ?? 0}
+              </p>
+            </div>
+            <div className="rounded-lg border border-border/70 bg-background/50 p-3">
+              <div className="mb-1 flex items-center gap-2 text-foreground/80">
+                <Cloud className="h-3.5 w-3.5" />
+                <span className="text-[11px] font-semibold uppercase tracking-[0.18em]">
+                  Machines
+                </span>
+              </div>
+              <p className="text-lg font-semibold text-foreground">
+                {machines?.length ?? 0}
+              </p>
+            </div>
+          </div>
+          <p className="text-xs leading-5">
+            Convex is linked and Clerk-authenticated. The next slice is machine enrollment and job
+            claiming against this workspace.
+          </p>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
 
 function SignedInApp() {
   return (
     <div className="relative h-screen">
+      <CloudBootstrap />
+      <CloudStatusCard />
       <div className="pointer-events-none absolute inset-x-0 top-3 z-50 flex justify-end px-3">
         <div className="pointer-events-auto rounded-full border border-border bg-card/90 p-1 shadow-lg backdrop-blur">
           <UserButton />

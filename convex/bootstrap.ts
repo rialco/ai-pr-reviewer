@@ -1,4 +1,4 @@
-import { mutationGeneric, queryGeneric } from "convex/server";
+import { mutation, query } from "./_generated/server";
 import {
   displayNameFromIdentity,
   nowIso,
@@ -7,7 +7,7 @@ import {
   workspaceSlugFromIdentity,
 } from "./lib/auth";
 
-export const ensureCurrentUser = mutationGeneric({
+export const ensureCurrentUser = mutation({
   args: {},
   handler: async (ctx) => {
     const identity = await requireIdentity(ctx);
@@ -88,7 +88,7 @@ export const ensureCurrentUser = mutationGeneric({
   },
 });
 
-export const viewer = queryGeneric({
+export const viewer = query({
   args: {},
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();

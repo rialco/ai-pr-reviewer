@@ -1,8 +1,8 @@
-import { mutationGeneric, queryGeneric } from "convex/server";
+import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { nowIso, requireWorkspaceAccess } from "./lib/auth";
 
-export const listForWorkspace = queryGeneric({
+export const listForWorkspace = query({
   args: {
     workspaceId: v.id("workspaces"),
   },
@@ -20,7 +20,7 @@ export const listForWorkspace = queryGeneric({
   },
 });
 
-export const upsert = mutationGeneric({
+export const upsert = mutation({
   args: {
     workspaceId: v.id("workspaces"),
     owner: v.string(),
@@ -33,12 +33,12 @@ export const upsert = mutationGeneric({
     const now = nowIso();
     const label = `${args.owner}/${args.repo}`;
 
-    const existingRepos = await ctx.db
+    const existing = await ctx.db
       .query("repos")
-      .withIndex("by_workspaceId", (q) => q.eq("workspaceId", args.workspaceId))
-      .collect();
-
-    const existing = existingRepos.find((repo) => repo.label === label);
+      .withIndex("by_workspaceId_label", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("label", label),
+      )
+      .unique();
 
     const nextFields = {
       workspaceId: args.workspaceId,
@@ -65,7 +65,7 @@ export const upsert = mutationGeneric({
   },
 });
 
-export const remove = mutationGeneric({
+export const remove = mutation({
   args: {
     workspaceId: v.id("workspaces"),
     repoId: v.id("repos"),
