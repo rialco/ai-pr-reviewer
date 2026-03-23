@@ -1741,20 +1741,6 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             pipClassName="bg-primary/70"
           />
           <div className="p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm text-muted-foreground">
-                  {comments.length} comment{comments.length === 1 ? "" : "s"}
-                </span>
-                {pendingGithubCommentCount > 0 ? <Badge variant="default">{pendingGithubCommentCount} pending triage</Badge> : null}
-                {fixableGithubCommentCount > 0 ? <Badge variant="must_fix">{fixableGithubCommentCount} actionable</Badge> : null}
-                {replyableGithubCommentCount > 0 ? <Badge variant="fixed">{replyableGithubCommentCount} fixed</Badge> : null}
-              </div>
-              <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                <RefreshCw className="h-3.5 w-3.5" />
-                {selectedMachine ? `Refresh via ${selectedMachine.machineName}` : "Register a machine checkout to refresh"}
-              </span>
-            </div>
             {refreshError ? (
               <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                 {refreshError}
