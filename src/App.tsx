@@ -52,7 +52,7 @@ export function App() {
   return (
     <div className="flex h-full">
       {/* Sidebar */}
-      <aside className="w-[340px] border-r border-border flex flex-col shrink-0">
+      <aside className="w-[350px] border-r border-border flex flex-col shrink-0">
         {/* Header */}
         <div className="p-4 border-b border-border">
           <div className="flex items-center gap-2">

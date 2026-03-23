@@ -69,9 +69,11 @@ export function RepoList() {
                   <p className="truncate text-sm font-semibold leading-tight text-foreground">
                     {repo.label}
                   </p>
-                  <span className="rounded-full border border-border/70 bg-muted/20 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    {configs.length} checkout{configs.length === 1 ? "" : "s"}
-                  </span>
+                  {configs.length > 1 ? (
+                    <span className="rounded-full border border-border/70 bg-muted/20 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      {configs.length} checkout{configs.length === 1 ? "" : "s"}
+                    </span>
+                  ) : null}
                 </div>
               </div>
               <Button
@@ -85,7 +87,58 @@ export function RepoList() {
               </Button>
             </div>
 
-            {configs.length > 0 ? (
+            {configs.length === 1 ? (
+              (() => {
+                const config = configs[0];
+                const syncKey = `${config.repoId}:${config.machineSlug}`;
+                const isSyncing = syncingKey === syncKey;
+
+                return (
+                  <div className="mt-1 flex items-center gap-2 rounded-lg bg-background/35 px-1.5 py-1">
+                    <span
+                      className={`h-2 w-2 shrink-0 rounded-full ${machineStatusTone(config.machineStatus)}`}
+                      title={config.machineStatus}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[12px] font-medium text-foreground">
+                        {config.machineName}
+                      </p>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6.5 w-6.5 rounded-md"
+                      title={config.localPath}
+                      aria-label={`Checkout path for ${config.machineName}`}
+                    >
+                      <FolderOpen className="h-3 w-3 text-muted-foreground" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6.5 w-6.5 rounded-md"
+                      disabled={!activeWorkspaceId || config.machineStatus === "busy" || isSyncing}
+                      title="Queue repo sync on this machine"
+                      onClick={() => {
+                        if (!activeWorkspaceId) return;
+                        setSyncingKey(syncKey);
+                        void enqueueRepoSync({
+                          workspaceId: activeWorkspaceId,
+                          repoId: repo._id,
+                          machineSlug: config.machineSlug,
+                        }).finally(() => setSyncingKey(null));
+                      }}
+                    >
+                      {isSyncing ? (
+                        <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                      ) : (
+                        <RefreshCw className="h-3 w-3 text-muted-foreground" />
+                      )}
+                    </Button>
+                  </div>
+                );
+              })()
+            ) : configs.length > 0 ? (
               <div className="mt-1.5 space-y-1 border-t border-border/60 pt-1.5">
                 {configs.map((config) => {
                   const syncKey = `${config.repoId}:${config.machineSlug}`;
