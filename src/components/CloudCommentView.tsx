@@ -378,66 +378,73 @@ function AnalysisDetailsPanel({
         )}
       </button>
 
-      {expanded ? (
-        <>
-          {analysisReasoning ? (
-            <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{analysisReasoning}</p>
-          ) : null}
+      <div
+        className={cn(
+          "grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-out",
+          expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+        )}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="pt-3">
+            {analysisReasoning ? (
+              <p className="whitespace-pre-wrap text-sm leading-6">{analysisReasoning}</p>
+            ) : null}
 
-          {analysisDetails ? (
-            <div className="mt-3 rounded border border-emerald-500/15 bg-black/10 p-3 text-xs text-emerald-100/80">
-              <div className="flex flex-wrap gap-2">
-                {analysisDetails.severity ? (
-                  <Badge variant={categoryVariant[analysisDetails.severity] ?? "outline"}>
-                    {categoryLabel[analysisDetails.severity] ?? analysisDetails.severity}
-                  </Badge>
+            {analysisDetails ? (
+              <div className="mt-3 rounded border border-emerald-500/15 bg-black/10 p-3 text-xs text-emerald-100/80">
+                <div className="flex flex-wrap gap-2">
+                  {analysisDetails.severity ? (
+                    <Badge variant={categoryVariant[analysisDetails.severity] ?? "outline"}>
+                      {categoryLabel[analysisDetails.severity] ?? analysisDetails.severity}
+                    </Badge>
+                  ) : null}
+                  {analysisDetails.confidence != null ? (
+                    <Badge variant="outline">Confidence {analysisDetails.confidence}/5</Badge>
+                  ) : null}
+                  {analysisDetails.verdict ? (
+                    <Badge variant="outline">{analysisDetails.verdict}</Badge>
+                  ) : null}
+                  {analysisDetails.accessMode ? (
+                    <Badge variant="outline">
+                      {analysisDetails.accessMode === "FULL_CODEBASE" ? "Full Codebase" : "Diff Only"}
+                    </Badge>
+                  ) : null}
+                </div>
+
+                {analysisDetails.evidence?.riskSummary ? (
+                  <p className="mt-2"><span className="font-medium text-foreground">Risk:</span> {analysisDetails.evidence.riskSummary}</p>
                 ) : null}
-                {analysisDetails.confidence != null ? (
-                  <Badge variant="outline">Confidence {analysisDetails.confidence}/5</Badge>
+                {analysisDetails.evidence?.validationNotes ? (
+                  <p className="mt-1"><span className="font-medium text-foreground">Limitations:</span> {analysisDetails.evidence.validationNotes}</p>
                 ) : null}
-                {analysisDetails.verdict ? (
-                  <Badge variant="outline">{analysisDetails.verdict}</Badge>
+                {joinMeta(analysisDetails.evidence?.filesRead) ? (
+                  <p className="mt-1"><span className="font-medium text-foreground">Files:</span> {joinMeta(analysisDetails.evidence?.filesRead)}</p>
                 ) : null}
-                {analysisDetails.accessMode ? (
-                  <Badge variant="outline">
-                    {analysisDetails.accessMode === "FULL_CODEBASE" ? "Full Codebase" : "Diff Only"}
-                  </Badge>
+                {joinMeta(analysisDetails.evidence?.symbolsChecked) ? (
+                  <p className="mt-1"><span className="font-medium text-foreground">Symbols:</span> {joinMeta(analysisDetails.evidence?.symbolsChecked)}</p>
+                ) : null}
+                {joinMeta(analysisDetails.evidence?.callersChecked) ? (
+                  <p className="mt-1"><span className="font-medium text-foreground">Callers:</span> {joinMeta(analysisDetails.evidence?.callersChecked)}</p>
+                ) : null}
+                {joinMeta(analysisDetails.evidence?.testsChecked) ? (
+                  <p className="mt-1"><span className="font-medium text-foreground">Tests:</span> {joinMeta(analysisDetails.evidence?.testsChecked)}</p>
                 ) : null}
               </div>
+            ) : null}
 
-              {analysisDetails.evidence?.riskSummary ? (
-                <p className="mt-2"><span className="font-medium text-foreground">Risk:</span> {analysisDetails.evidence.riskSummary}</p>
-              ) : null}
-              {analysisDetails.evidence?.validationNotes ? (
-                <p className="mt-1"><span className="font-medium text-foreground">Limitations:</span> {analysisDetails.evidence.validationNotes}</p>
-              ) : null}
-              {joinMeta(analysisDetails.evidence?.filesRead) ? (
-                <p className="mt-1"><span className="font-medium text-foreground">Files:</span> {joinMeta(analysisDetails.evidence?.filesRead)}</p>
-              ) : null}
-              {joinMeta(analysisDetails.evidence?.symbolsChecked) ? (
-                <p className="mt-1"><span className="font-medium text-foreground">Symbols:</span> {joinMeta(analysisDetails.evidence?.symbolsChecked)}</p>
-              ) : null}
-              {joinMeta(analysisDetails.evidence?.callersChecked) ? (
-                <p className="mt-1"><span className="font-medium text-foreground">Callers:</span> {joinMeta(analysisDetails.evidence?.callersChecked)}</p>
-              ) : null}
-              {joinMeta(analysisDetails.evidence?.testsChecked) ? (
-                <p className="mt-1"><span className="font-medium text-foreground">Tests:</span> {joinMeta(analysisDetails.evidence?.testsChecked)}</p>
-              ) : null}
-            </div>
-          ) : null}
-
-          {suggestion ? (
-            <div className="mt-3 rounded border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-100/85">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
-                Suggested Change
-              </p>
-              <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5">
-                {suggestion}
-              </pre>
-            </div>
-          ) : null}
-        </>
-      ) : null}
+            {suggestion ? (
+              <div className="mt-3 rounded border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-100/85">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
+                  Suggested Change
+                </p>
+                <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5">
+                  {suggestion}
+                </pre>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1757,79 +1764,81 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             pipClassName="bg-primary/70"
           />
           <div className="p-4">
-            {refreshError ? (
-              <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                {refreshError}
-              </div>
-            ) : null}
-            {reviewError ? (
-              <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                {reviewError}
-              </div>
-            ) : null}
-            {analysisError ? (
-              <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                {analysisError}
-              </div>
-            ) : null}
-            {fixError ? (
-              <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                {fixError}
-              </div>
-            ) : null}
-            {replyError ? (
-              <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                {replyError}
-              </div>
-            ) : null}
-
-            <div className="mt-3 rounded-lg border border-white/8 bg-black/10 px-3 py-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-                  Actions
+            <div className="space-y-3">
+              {refreshError ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {refreshError}
                 </div>
-                <span className="text-[11px] text-muted-foreground/70">
-                  {selectedMachineRecord
-                    ? `Using ${selectedMachineRecord.name}`
-                    : "Select a machine checkout to enable comment actions"}
-                </span>
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                {selectedMachineSlug && availableAnalyzerAgents.length > 0 ? (
-                  <PreferredAgentSelect
-                    value={preferredActionAgent}
-                    options={availableAnalyzerAgents}
-                    onChange={setPreferredActionAgent}
-                  />
-                ) : null}
-                {selectedMachineSlug && preferredActionAgent && pendingGithubCommentCount > 0 ? (
-                  <Button size="sm" onClick={() => void handleAnalyzeGithubComments(preferredActionAgent)}>
-                    <Sparkles className="h-3.5 w-3.5" />
-                    Analyze ({pendingGithubCommentCount})
-                  </Button>
-                ) : null}
-                {selectedMachineSlug && preferredActionAgent && githubReanalyzableCount > 0 ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void handleAnalyzeGithubComments(preferredActionAgent, true)}
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    Re-analyze ({githubReanalyzableCount})
-                  </Button>
-                ) : null}
-                {selectedMachineSlug && preferredActionAgent && fixableGithubCommentCount > 0 ? (
-                  <Button size="sm" onClick={() => void handleFixGithubComments(preferredActionAgent)}>
-                    <Wrench className="h-3.5 w-3.5" />
-                    Fix ({fixableGithubCommentCount})
-                  </Button>
-                ) : null}
-                {selectedMachineSlug && selectedMachineRecord?.capabilities.gh && replyableGithubCommentCount > 0 ? (
-                  <Button variant="outline" size="sm" onClick={() => void handleReplyToGithubComments()}>
-                    <MessageSquareReply className="h-3.5 w-3.5" />
-                    Reply ({replyableGithubCommentCount})
-                  </Button>
-                ) : null}
+              ) : null}
+              {reviewError ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {reviewError}
+                </div>
+              ) : null}
+              {analysisError ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {analysisError}
+                </div>
+              ) : null}
+              {fixError ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {fixError}
+                </div>
+              ) : null}
+              {replyError ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {replyError}
+                </div>
+              ) : null}
+
+              <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+                    Actions
+                  </div>
+                  <span className="text-[11px] text-muted-foreground/70">
+                    {selectedMachineRecord
+                      ? `Using ${selectedMachineRecord.name}`
+                      : "Select a machine checkout to enable comment actions"}
+                  </span>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {selectedMachineSlug && availableAnalyzerAgents.length > 0 ? (
+                    <PreferredAgentSelect
+                      value={preferredActionAgent}
+                      options={availableAnalyzerAgents}
+                      onChange={setPreferredActionAgent}
+                    />
+                  ) : null}
+                  {selectedMachineSlug && preferredActionAgent && pendingGithubCommentCount > 0 ? (
+                    <Button size="sm" onClick={() => void handleAnalyzeGithubComments(preferredActionAgent)}>
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Analyze ({pendingGithubCommentCount})
+                    </Button>
+                  ) : null}
+                  {selectedMachineSlug && preferredActionAgent && githubReanalyzableCount > 0 ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleAnalyzeGithubComments(preferredActionAgent, true)}
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Re-analyze ({githubReanalyzableCount})
+                    </Button>
+                  ) : null}
+                  {selectedMachineSlug && preferredActionAgent && fixableGithubCommentCount > 0 ? (
+                    <Button size="sm" onClick={() => void handleFixGithubComments(preferredActionAgent)}>
+                      <Wrench className="h-3.5 w-3.5" />
+                      Fix ({fixableGithubCommentCount})
+                    </Button>
+                  ) : null}
+                  {selectedMachineSlug && selectedMachineRecord?.capabilities.gh && replyableGithubCommentCount > 0 ? (
+                    <Button variant="outline" size="sm" onClick={() => void handleReplyToGithubComments()}>
+                      <MessageSquareReply className="h-3.5 w-3.5" />
+                      Reply ({replyableGithubCommentCount})
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             </div>
 
@@ -1935,60 +1944,62 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         <Card className="overflow-hidden bg-surface">
           <SectionHeader title="Review Comments" detail={reviewComments?.length ?? 0} pipClassName="bg-primary/60" />
           <div className="p-4">
-            {publishError ? (
-              <div className="mb-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                {publishError}
-              </div>
-            ) : null}
-            {selectedMachineRecord ? (
-              <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-                    Actions
-                  </div>
-                <span className="text-[11px] text-muted-foreground/70">
-                  Using {selectedMachineRecord.name}
-                </span>
-              </div>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  {selectedMachineSlug && availableAnalyzerAgents.length > 0 ? (
-                    <PreferredAgentSelect
-                      value={preferredActionAgent}
-                      options={availableAnalyzerAgents}
-                      onChange={setPreferredActionAgent}
-                    />
-                  ) : null}
-                  {selectedMachineSlug && preferredActionAgent && reviewPending.length > 0 ? (
-                    <Button size="sm" onClick={() => void handleAnalyzePendingReviewComments(preferredActionAgent)}>
-                      <Sparkles className="h-3.5 w-3.5" />
-                      Analyze ({reviewPending.length})
-                    </Button>
-                  ) : null}
-                  {selectedMachineSlug && preferredActionAgent && reviewReanalyzableCount > 0 ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void handleAnalyzePendingReviewComments(preferredActionAgent, true)}
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" />
-                      Re-analyze ({reviewReanalyzableCount})
-                    </Button>
-                  ) : null}
-                  {selectedMachineSlug && preferredActionAgent && reviewFixableCount > 0 ? (
-                    <Button size="sm" onClick={() => void handleFixPendingReviewComments(preferredActionAgent)}>
-                      <Wrench className="h-3.5 w-3.5" />
-                      Fix ({reviewFixableCount})
-                    </Button>
-                  ) : null}
-                  {selectedMachineSlug && selectedMachineRecord.capabilities.gh && publishableReviewCount > 0 ? (
-                    <Button variant="outline" size="sm" onClick={() => void handlePublishAvailableReviews()}>
-                      <Upload className="h-3.5 w-3.5" />
-                      Publish ({publishableReviewCount})
-                    </Button>
-                  ) : null}
+            <div className="space-y-3">
+              {publishError ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {publishError}
                 </div>
-              </div>
-            ) : null}
+              ) : null}
+              {selectedMachineRecord ? (
+                <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+                      Actions
+                    </div>
+                    <span className="text-[11px] text-muted-foreground/70">
+                      Using {selectedMachineRecord.name}
+                    </span>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    {selectedMachineSlug && availableAnalyzerAgents.length > 0 ? (
+                      <PreferredAgentSelect
+                        value={preferredActionAgent}
+                        options={availableAnalyzerAgents}
+                        onChange={setPreferredActionAgent}
+                      />
+                    ) : null}
+                    {selectedMachineSlug && preferredActionAgent && reviewPending.length > 0 ? (
+                      <Button size="sm" onClick={() => void handleAnalyzePendingReviewComments(preferredActionAgent)}>
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Analyze ({reviewPending.length})
+                      </Button>
+                    ) : null}
+                    {selectedMachineSlug && preferredActionAgent && reviewReanalyzableCount > 0 ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleAnalyzePendingReviewComments(preferredActionAgent, true)}
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Re-analyze ({reviewReanalyzableCount})
+                      </Button>
+                    ) : null}
+                    {selectedMachineSlug && preferredActionAgent && reviewFixableCount > 0 ? (
+                      <Button size="sm" onClick={() => void handleFixPendingReviewComments(preferredActionAgent)}>
+                        <Wrench className="h-3.5 w-3.5" />
+                        Fix ({reviewFixableCount})
+                      </Button>
+                    ) : null}
+                    {selectedMachineSlug && selectedMachineRecord.capabilities.gh && publishableReviewCount > 0 ? (
+                      <Button variant="outline" size="sm" onClick={() => void handlePublishAvailableReviews()}>
+                        <Upload className="h-3.5 w-3.5" />
+                        Publish ({publishableReviewCount})
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+            </div>
             {reviewComments && reviewComments.length > 0 ? (
               <div className="mt-3 space-y-3">
                 <div className="flex flex-wrap gap-2">
