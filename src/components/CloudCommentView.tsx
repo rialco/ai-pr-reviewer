@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "convex/react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronRight, Clock3, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, History, Loader2, MessageSquareReply, Minus, Plus, RefreshCw, Sparkles, Upload, Users, Wrench, X } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
@@ -34,6 +34,18 @@ type TimelineRunHistory = {
   steps: TimelineHistoryStep[];
   output: string[];
 };
+
+type CommentFilter =
+  | "all"
+  | "pending"
+  | "must_fix"
+  | "should_fix"
+  | "nice_to_have"
+  | "fix_failed"
+  | "fixed"
+  | "already_addressed"
+  | "dismissed"
+  | "other";
 
 const categoryVariant: Record<string, "must_fix" | "should_fix" | "nice_to_have" | "dismiss" | "already_addressed"> = {
   MUST_FIX: "must_fix",
@@ -72,6 +84,8 @@ type TimelineDisplayItem =
       meta?: string | null;
       icon: typeof Sparkles;
       color: string;
+      tone: "pending" | "success" | "error" | "info" | "neutral";
+      toneLabel: string;
       event: {
         _id: string;
         createdAt: string;
@@ -80,48 +94,41 @@ type TimelineDisplayItem =
       isLatest: boolean;
     };
 
-const timelineEventConfig: Record<string, { icon: typeof Sparkles; label: string; color: string }> = {
-  comments_fetched: { icon: RefreshCw, label: "Comments synced", color: "text-blue-400" },
-  analysis_requested: { icon: Sparkles, label: "Analysis requested", color: "text-violet-400" },
-  comments_analyzed: { icon: Sparkles, label: "Comments analyzed", color: "text-violet-400" },
-  fix_started: { icon: Wrench, label: "Fix started", color: "text-yellow-400" },
-  fix_completed: { icon: Check, label: "Fix committed", color: "text-emerald-400" },
-  fix_no_changes: { icon: AlertCircle, label: "Fix — no changes", color: "text-muted-foreground" },
-  fix_failed: { icon: X, label: "Fix failed", color: "text-destructive" },
-  local_fix_started: { icon: Wrench, label: "Local fix started", color: "text-yellow-400" },
-  local_fix_completed: { icon: Check, label: "Local fix committed", color: "text-emerald-400" },
-  local_fix_no_changes: { icon: AlertCircle, label: "Local fix — no changes", color: "text-muted-foreground" },
-  local_fix_failed: { icon: X, label: "Local fix failed", color: "text-destructive" },
-  review_requested: { icon: Users, label: "Review requested", color: "text-blue-400" },
-  review_completed: { icon: Users, label: "Review completed", color: "text-emerald-400" },
-  comments_replied: { icon: MessageSquareReply, label: "Replied on GitHub", color: "text-emerald-400" },
-  review_publish_requested: { icon: Upload, label: "Review publish requested", color: "text-blue-400" },
-  review_published: { icon: Upload, label: "Review published", color: "text-emerald-400" },
-  comment_recategorized: { icon: Sparkles, label: "Comment recategorized", color: "text-sky-300" },
+const timelineEventConfig: Record<
+  string,
+  {
+    icon: typeof Sparkles;
+    label: string;
+    color: string;
+    tone: "pending" | "success" | "error" | "info" | "neutral";
+    toneLabel: string;
+  }
+> = {
+  refresh_requested: { icon: RefreshCw, label: "Refresh requested", color: "text-sky-300", tone: "pending", toneLabel: "Queued" },
+  refresh_failed: { icon: X, label: "Refresh failed", color: "text-destructive", tone: "error", toneLabel: "Failed" },
+  comments_fetched: { icon: RefreshCw, label: "Comments synced", color: "text-blue-400", tone: "success", toneLabel: "Success" },
+  analysis_requested: { icon: Sparkles, label: "Analysis requested", color: "text-violet-400", tone: "pending", toneLabel: "Queued" },
+  analysis_failed: { icon: X, label: "Analysis failed", color: "text-destructive", tone: "error", toneLabel: "Failed" },
+  comments_analyzed: { icon: Sparkles, label: "Comments analyzed", color: "text-violet-400", tone: "success", toneLabel: "Success" },
+  fix_started: { icon: Wrench, label: "Fix started", color: "text-yellow-400", tone: "pending", toneLabel: "Queued" },
+  fix_completed: { icon: Check, label: "Fix committed", color: "text-emerald-400", tone: "success", toneLabel: "Success" },
+  fix_no_changes: { icon: AlertCircle, label: "Fix — no changes", color: "text-muted-foreground", tone: "neutral", toneLabel: "No changes" },
+  fix_failed: { icon: X, label: "Fix failed", color: "text-destructive", tone: "error", toneLabel: "Failed" },
+  local_fix_started: { icon: Wrench, label: "Local fix started", color: "text-yellow-400", tone: "pending", toneLabel: "Queued" },
+  local_fix_completed: { icon: Check, label: "Local fix committed", color: "text-emerald-400", tone: "success", toneLabel: "Success" },
+  local_fix_no_changes: { icon: AlertCircle, label: "Local fix — no changes", color: "text-muted-foreground", tone: "neutral", toneLabel: "No changes" },
+  local_fix_failed: { icon: X, label: "Local fix failed", color: "text-destructive", tone: "error", toneLabel: "Failed" },
+  review_requested: { icon: Users, label: "Review requested", color: "text-blue-400", tone: "pending", toneLabel: "Queued" },
+  review_completed: { icon: Users, label: "Review completed", color: "text-emerald-400", tone: "success", toneLabel: "Success" },
+  review_failed: { icon: X, label: "Review failed", color: "text-destructive", tone: "error", toneLabel: "Failed" },
+  comments_replied: { icon: MessageSquareReply, label: "Replied on GitHub", color: "text-emerald-400", tone: "success", toneLabel: "Success" },
+  comments_reply_failed: { icon: X, label: "Reply posting failed", color: "text-destructive", tone: "error", toneLabel: "Failed" },
+  review_publish_requested: { icon: Upload, label: "Review publish requested", color: "text-blue-400", tone: "pending", toneLabel: "Queued" },
+  review_published: { icon: Upload, label: "Review published", color: "text-emerald-400", tone: "success", toneLabel: "Success" },
+  review_publish_failed: { icon: X, label: "Review publish failed", color: "text-destructive", tone: "error", toneLabel: "Failed" },
+  comment_recategorized: { icon: Sparkles, label: "Comment recategorized", color: "text-sky-300", tone: "info", toneLabel: "Updated" },
 };
 
-type SectionColor =
-  | "must_fix"
-  | "should_fix"
-  | "nice_to_have"
-  | "dismiss"
-  | "already_addressed"
-  | "fixing"
-  | "fixed"
-  | "fix_failed"
-  | "muted";
-
-const sectionColorMap: Record<SectionColor, string> = {
-  must_fix: "bg-must-fix",
-  should_fix: "bg-should-fix",
-  nice_to_have: "bg-nice-to-have",
-  dismiss: "bg-dismiss",
-  already_addressed: "bg-already-addressed",
-  fixing: "bg-fixing",
-  fixed: "bg-fixed",
-  fix_failed: "bg-fix-failed",
-  muted: "bg-muted-foreground/40",
-};
 
 function formatTimestamp(value: string) {
   return new Date(value).toLocaleString();
@@ -165,8 +172,50 @@ function getTimelineConfig(eventType: string) {
       icon: History,
       label: eventType.replaceAll("_", " "),
       color: "text-muted-foreground",
+      tone: "neutral" as const,
+      toneLabel: "Event",
     }
   );
+}
+
+function getTimelineToneClasses(tone: "pending" | "success" | "error" | "info" | "neutral") {
+  switch (tone) {
+    case "pending":
+      return {
+        card: "border-sky-400/18 bg-sky-400/6",
+        icon: "border-sky-400/20 bg-sky-400/10 text-sky-300",
+        badge: "border-sky-400/25 bg-sky-400/12 text-sky-200",
+        connector: "bg-sky-400/18",
+      };
+    case "success":
+      return {
+        card: "border-emerald-400/18 bg-emerald-400/6",
+        icon: "border-emerald-400/20 bg-emerald-400/10 text-emerald-300",
+        badge: "border-emerald-400/25 bg-emerald-400/12 text-emerald-200",
+        connector: "bg-emerald-400/18",
+      };
+    case "error":
+      return {
+        card: "border-rose-400/20 bg-rose-400/7",
+        icon: "border-rose-400/20 bg-rose-400/10 text-rose-300",
+        badge: "border-rose-400/25 bg-rose-400/12 text-rose-200",
+        connector: "bg-rose-400/18",
+      };
+    case "info":
+      return {
+        card: "border-violet-400/18 bg-violet-400/6",
+        icon: "border-violet-400/20 bg-violet-400/10 text-violet-300",
+        badge: "border-violet-400/25 bg-violet-400/12 text-violet-200",
+        connector: "bg-violet-400/18",
+      };
+    default:
+      return {
+        card: "border-border bg-surface/60",
+        icon: "border-border/80 bg-background/90 text-muted-foreground",
+        badge: "border-border bg-background/70 text-muted-foreground",
+        connector: "bg-foreground/20",
+      };
+  }
 }
 
 function joinMeta(items: string[] | undefined): string | null {
@@ -304,73 +353,6 @@ function ReviewerSignalPanel({
   );
 }
 
-function CollapsibleSection({
-  title,
-  count,
-  badge,
-  action,
-  color,
-  defaultOpen = true,
-  opacity,
-  embedded,
-  children,
-}: {
-  title: string;
-  count: number;
-  badge?: ReactNode;
-  action?: ReactNode;
-  color?: SectionColor;
-  defaultOpen?: boolean;
-  opacity?: string;
-  embedded?: boolean;
-  children: ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  if (count === 0) return null;
-  const pip = color ? sectionColorMap[color] : null;
-
-  return (
-    <div className={embedded ? "" : "rounded-lg border border-border overflow-hidden"}>
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => setOpen(!open)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            setOpen(!open);
-          }
-        }}
-        className={cn(
-          "flex items-center gap-2.5 px-3 cursor-pointer select-none transition-colors duration-100 hover:bg-white/[0.04] active:bg-white/[0.06]",
-          embedded ? "h-[34px]" : "h-[40px]",
-          open ? "bg-white/[0.02]" : "",
-        )}
-      >
-        {pip ? <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", pip)} /> : null}
-        <span className={cn("font-semibold tracking-wide uppercase text-muted-foreground", embedded ? "text-[10px]" : "text-[11px]")}>
-          {title}
-        </span>
-        <span className={cn("tabular-nums text-muted-foreground/50", embedded ? "text-[10px]" : "text-[11px]")}>
-          {count}
-        </span>
-        {badge ? <span className="ml-0.5">{badge}</span> : null}
-        <ChevronRight className={cn("ml-auto h-3 w-3 text-muted-foreground/40 transition-transform duration-200", open && "rotate-90")} />
-        {action ? (
-          <span onClick={(e) => e.stopPropagation()} className="ml-1">
-            {action}
-          </span>
-        ) : null}
-      </div>
-      <div className="grid transition-[grid-template-rows] duration-200 ease-out" style={{ gridTemplateRows: open ? "1fr" : "0fr" }}>
-        <div className="overflow-hidden">
-          <div className={cn("space-y-2 p-2", opacity)}>{children}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function TimelineCard({
   events,
   suggestion,
@@ -392,6 +374,8 @@ function TimelineCard({
         meta: `${formatRelativeTime(event.createdAt)} • ${formatTimestamp(event.createdAt)}`,
         icon: config.icon,
         color: config.color,
+        tone: config.tone,
+        toneLabel: config.toneLabel,
         event,
         isLatest: index === 0,
       };
@@ -470,19 +454,23 @@ function TimelineCard({
           const nextItem = visible[index + 1];
           const hasPreviousConnection = previousItem?.kind === "event";
           const hasNextConnection = nextItem?.kind === "event";
+          const toneClasses = getTimelineToneClasses(item.tone);
 
           return (
             <div key={item.key} className={cn("flex gap-3 px-3 py-3 transition-opacity duration-200", item.isLatest ? "opacity-100" : "opacity-45 hover:opacity-80")}>
               <div className="relative flex w-8 shrink-0 justify-center">
-                {hasPreviousConnection ? <span className="absolute left-1/2 top-[-12px] h-[16px] w-px -translate-x-1/2 bg-foreground/20" /> : null}
-                {hasNextConnection ? <span className="absolute left-1/2 top-8 bottom-[-12px] w-px -translate-x-1/2 bg-foreground/20" /> : null}
-                <div className={cn("relative z-10 mt-0.5 flex h-7 w-7 items-center justify-center rounded-full border bg-background/90", item.isLatest ? "border-current/20 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]" : "border-border/80", item.color)}>
+                {hasPreviousConnection ? <span className={cn("absolute left-1/2 top-[-12px] h-[16px] w-px -translate-x-1/2", toneClasses.connector)} /> : null}
+                {hasNextConnection ? <span className={cn("absolute left-1/2 top-8 bottom-[-12px] w-px -translate-x-1/2", toneClasses.connector)} /> : null}
+                <div className={cn("relative z-10 mt-0.5 flex h-7 w-7 items-center justify-center rounded-full border", toneClasses.icon, item.isLatest ? "shadow-[0_0_0_1px_rgba(255,255,255,0.04)]" : undefined, item.color)}>
                   <Icon className="h-3.5 w-3.5" />
                 </div>
               </div>
-              <div className="min-w-0 flex-1">
+              <div className={cn("min-w-0 flex-1 rounded-xl border px-3 py-2.5", toneClasses.card)}>
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs font-medium text-foreground/92">{item.title}</span>
+                  <Badge variant="outline" className={cn("h-4 px-1.5 text-[9px] uppercase tracking-wide", toneClasses.badge)}>
+                    {item.toneLabel}
+                  </Badge>
                   {item.isLatest ? <Badge variant="outline" className="h-4 px-1.5 text-[9px] uppercase tracking-wide">Latest</Badge> : null}
                 </div>
                 {item.meta ? (
@@ -535,7 +523,9 @@ function timelineLabel(eventType: string) {
   if (eventType === "comments_replied") return "Replies posted";
   if (eventType === "comments_reply_failed") return "Reply posting failed";
   if (eventType === "review_publish_requested") return "Review publish requested";
+  if (eventType === "review_published") return "Review published";
   if (eventType === "review_publish_failed") return "Review publish failed";
+  if (eventType === "review_failed") return "Review failed";
   if (eventType === "local_fix_started") return "Local fix requested";
   if (eventType === "local_fix_completed") return "Local fix completed";
   if (eventType === "local_fix_failed") return "Local fix failed";
@@ -559,10 +549,14 @@ function scoreAccent(score: number | null | undefined) {
 function formatTimelineDetail(event: { eventType: string; detail: Record<string, unknown> }) {
   const d = event.detail;
   switch (event.eventType) {
+    case "refresh_failed":
+      return typeof d.errorMessage === "string" ? d.errorMessage.split("\n")[0] : "Refresh did not complete";
     case "comments_fetched":
       return `${typeof d.machineSlug === "string" ? d.machineSlug : "worker"} synced ${typeof d.commentCount === "number" ? d.commentCount : 0} comment(s)`;
     case "analysis_requested":
       return `${localAgentLabel(typeof d.analyzerAgent === "string" ? d.analyzerAgent : undefined)} queued ${typeof d.count === "number" ? d.count : 0} comment(s)`;
+    case "analysis_failed":
+      return typeof d.errorMessage === "string" ? d.errorMessage.split("\n")[0] : "Analysis did not complete";
     case "comments_analyzed": {
       if (d.categories && typeof d.categories === "object") {
         const parts = Object.entries(d.categories as Record<string, number>).map(
@@ -578,17 +572,28 @@ function formatTimelineDetail(event: { eventType: string; detail: Record<string,
     case "fix_completed":
     case "local_fix_completed":
       return `${localAgentLabel(typeof d.fixerAgent === "string" ? d.fixerAgent : undefined)} committed ${typeof d.commitHash === "string" ? d.commitHash.slice(0, 12) : "changes"}`;
+    case "fix_failed":
+    case "local_fix_failed":
+      return typeof d.errorMessage === "string" ? d.errorMessage.split("\n")[0] : "Fix did not complete";
     case "fix_no_changes":
     case "local_fix_no_changes":
       return `${localAgentLabel(typeof d.fixerAgent === "string" ? d.fixerAgent : undefined)} produced no diff`;
     case "comments_replied":
       return `${typeof d.count === "number" ? d.count : 0} comment(s) replied`;
+    case "comments_reply_failed":
+      return typeof d.errorMessage === "string" ? d.errorMessage.split("\n")[0] : "Reply posting failed";
     case "review_requested":
       return `${typeof d.reviewerId === "string" ? localAgentLabel(d.reviewerId) : "Reviewer"} requested`;
     case "review_completed":
       return `${typeof d.reviewerId === "string" ? localAgentLabel(d.reviewerId) : "Reviewer"} • ${d.confidenceScore ?? "--"}/5 • ${d.commentCount ?? 0} comments`;
+    case "review_failed":
+      return typeof d.errorMessage === "string" ? d.errorMessage.split("\n")[0] : "Review did not complete";
     case "review_publish_requested":
       return `${typeof d.reviewerId === "string" ? localAgentLabel(d.reviewerId) : "Reviewer"} publish queued`;
+    case "review_published":
+      return `${typeof d.reviewerId === "string" ? localAgentLabel(d.reviewerId) : "Reviewer"} published ${typeof d.commentCount === "number" ? d.commentCount : 0} comment(s)`;
+    case "review_publish_failed":
+      return typeof d.errorMessage === "string" ? d.errorMessage.split("\n")[0] : "Review publish failed";
     case "comment_recategorized":
       return `Set category to ${typeof d.category === "string" ? d.category : "unknown"}`;
     default:
@@ -642,6 +647,8 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [timelineTab, setTimelineTab] = useState<"history" | "parameters" | "prompt">("history");
   const [selectedReviewerId, setSelectedReviewerId] = useState<"claude" | "codex" | null>(null);
   const [reviewDetailsTab, setReviewDetailsTab] = useState<"summary" | "raw">("summary");
+  const [githubFilter, setGithubFilter] = useState<CommentFilter>("all");
+  const [reviewFilter, setReviewFilter] = useState<CommentFilter>("all");
   const [showBody, setShowBody] = useState(false);
   const [showAllFiles, setShowAllFiles] = useState(false);
   const timelineEventDetail = useQuery(
@@ -783,6 +790,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     () => githubComments.filter((comment) => botUsers.includes(comment.user)),
     [botUsers, githubComments],
   );
+  const githubOtherComments = useMemo(
+    () => githubComments.filter((comment) => !botUsers.includes(comment.user)),
+    [botUsers, githubComments],
+  );
   const githubPending = useMemo(
     () => githubBotComments.filter((comment) => comment.status === "new" || comment.status === "analyzing"),
     [githubBotComments],
@@ -863,6 +874,77 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     () => (reviewComments ?? []).filter((comment) => !comment.supersededAt && (comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed")).length,
     [reviewComments],
   );
+  const visibleGithubComments = useMemo(() => {
+    switch (githubFilter) {
+      case "pending":
+        return githubPending;
+      case "must_fix":
+        return githubMustFix;
+      case "should_fix":
+        return githubShouldFix;
+      case "nice_to_have":
+        return githubNiceToHave;
+      case "fix_failed":
+        return githubFixFailed;
+      case "fixed":
+        return githubFixed;
+      case "already_addressed":
+        return githubAlreadyAddressed;
+      case "dismissed":
+        return githubDismissedByAnalysis;
+      case "other":
+        return githubOtherComments;
+      case "all":
+      default:
+        return [...githubBotComments, ...githubOtherComments].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    }
+  }, [
+    githubAlreadyAddressed,
+    githubBotComments,
+    githubDismissedByAnalysis,
+    githubFilter,
+    githubFixed,
+    githubFixFailed,
+    githubMustFix,
+    githubNiceToHave,
+    githubOtherComments,
+    githubPending,
+    githubShouldFix,
+  ]);
+  const visibleReviewComments = useMemo(() => {
+    switch (reviewFilter) {
+      case "pending":
+        return reviewPending;
+      case "must_fix":
+        return reviewMustFix;
+      case "should_fix":
+        return reviewShouldFix;
+      case "nice_to_have":
+        return reviewNiceToHave;
+      case "fix_failed":
+        return reviewFixFailed;
+      case "fixed":
+        return reviewFixed;
+      case "already_addressed":
+        return reviewAlreadyAddressed;
+      case "dismissed":
+        return reviewDismissedByAnalysis;
+      case "all":
+      default:
+        return reviewComments ?? [];
+    }
+  }, [
+    reviewAlreadyAddressed,
+    reviewComments,
+    reviewDismissedByAnalysis,
+    reviewFilter,
+    reviewFixed,
+    reviewFixFailed,
+    reviewMustFix,
+    reviewNiceToHave,
+    reviewPending,
+    reviewShouldFix,
+  ]);
 
   useEffect(() => {
     setTimelineTab("history");
@@ -1449,140 +1531,98 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
             ) : (
               <div className="mt-3 space-y-3">
-                <CollapsibleSection title="Pending Analysis" count={githubPending.length} color="muted">
-                  {githubPending.map((comment) => (
-                    <Card key={comment._id} className="border-white/8 bg-zinc-900/55 p-4">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">{comment.user}</Badge>
-                        <CommentTypeBadge type={comment.type} />
-                        {comment.path ? <Badge variant="outline">{comment.path}{comment.line ? `:${comment.line}` : ""}</Badge> : null}
-                        <Badge variant="outline">{comment.status}</Badge>
-                        <span className="text-xs text-muted-foreground">{formatTimestamp(comment.updatedAt)}</span>
-                      </div>
-                      <div className="mt-3 text-sm leading-6 text-foreground/88">
-                        <MarkdownBody text={comment.body} />
-                      </div>
-                    </Card>
-                  ))}
-                </CollapsibleSection>
-
-                <CollapsibleSection
-                  title="Analyzed"
-                  count={githubMustFix.length + githubShouldFix.length + githubNiceToHave.length + githubFixing.length + githubFixFailed.length + githubAlreadyAddressed.length + githubDismissedByAnalysis.length}
-                  color="must_fix"
-                  badge={
-                    <span className="ml-1 flex gap-1">
-                      {githubMustFix.length > 0 ? <Badge variant="must_fix">{githubMustFix.length} must fix</Badge> : null}
-                      {githubShouldFix.length > 0 ? <Badge variant="should_fix">{githubShouldFix.length} should fix</Badge> : null}
-                      {githubFixFailed.length > 0 ? <Badge variant="fix_failed">{githubFixFailed.length} failed</Badge> : null}
-                    </span>
-                  }
-                >
+                <div className="flex flex-wrap gap-2">
                   {([
-                    ["Fixing", githubFixing, "fixing"],
-                    ["Must Fix", githubMustFix, "must_fix"],
-                    ["Should Fix", githubShouldFix, "should_fix"],
-                    ["Nice to Have", githubNiceToHave, "nice_to_have"],
-                    ["Fix Failed", githubFixFailed, "fix_failed"],
-                    ["Already Addressed", githubAlreadyAddressed, "already_addressed"],
-                    ["Dismissed by Analysis", githubDismissedByAnalysis, "dismiss"],
-                  ] as const).map(([title, group, color]) => (
-                    <CollapsibleSection key={title} title={title} count={group.length} color={color as SectionColor} embedded defaultOpen={title === "Must Fix" || title === "Should Fix" || title === "Fixing"}>
-                      {group.map((comment) => {
-                        const selectedCategory = comment.analysisCategory ?? "UNTRIAGED";
-                        return (
-                          <Card key={comment._id} className="border-white/8 bg-zinc-900/55 p-4">
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                              <div className="min-w-0 flex-1">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <Badge variant="outline">{comment.user}</Badge>
-                                  <CommentTypeBadge type={comment.type} />
-                                  {comment.path ? <Badge variant="outline">{comment.path}{comment.line ? `:${comment.line}` : ""}</Badge> : null}
-                                  <Badge variant="outline">{comment.status}</Badge>
-                                  {comment.analysisCategory ? (
-                                    <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
-                                      {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
-                                    </Badge>
-                                  ) : null}
-                                  <span className="text-xs text-muted-foreground">{formatTimestamp(comment.updatedAt)}</span>
-                                </div>
-                              </div>
-                              <Select
-                                value={selectedCategory}
-                                onValueChange={(value) => {
-                                  if (value === "UNTRIAGED") return;
-                                  void handleRecategorizeGithubComment(
-                                    comment._id,
-                                    value as "MUST_FIX" | "SHOULD_FIX" | "NICE_TO_HAVE" | "DISMISS" | "ALREADY_ADDRESSED",
-                                  );
-                                }}
-                              >
-                                <SelectTrigger className="h-8 w-[170px] bg-transparent text-xs">
-                                  <SelectValue placeholder="Set category" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="UNTRIAGED">Pending Triage</SelectItem>
-                                  <SelectItem value="MUST_FIX">Must Fix</SelectItem>
-                                  <SelectItem value="SHOULD_FIX">Should Fix</SelectItem>
-                                  <SelectItem value="NICE_TO_HAVE">Nice to Have</SelectItem>
-                                  <SelectItem value="ALREADY_ADDRESSED">Already Addressed</SelectItem>
-                                  <SelectItem value="DISMISS">Dismiss</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <div className="mt-3 text-sm leading-6 text-foreground/88">
-                              <MarkdownBody text={comment.body} />
-                            </div>
-                            <AnalysisDetailsPanel
-                              analysisReasoning={comment.analysisReasoning}
-                              analysisDetails={comment.analysisDetails}
-                            />
-                            {comment.fixCommitHash ? (
-                              <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
-                                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>
-                                <p className="mt-2 text-sm leading-6">
-                                  Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
-                                  {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
-                                </p>
-                                {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
-                                  <p className="mt-1 text-xs text-sky-100/80">
-                                    {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
-                                    {comment.fixFilesChanged.length > 4 ? "..." : ""}
-                                  </p>
-                                ) : null}
-                              </div>
-                            ) : null}
-                          </Card>
-                        );
-                      })}
-                    </CollapsibleSection>
+                    ["all", "All", comments.length],
+                    ["pending", "Pending", githubPending.length],
+                    ["must_fix", "Must Fix", githubMustFix.length],
+                    ["should_fix", "Should Fix", githubShouldFix.length],
+                    ["nice_to_have", "Nice to Have", githubNiceToHave.length],
+                    ["fix_failed", "Fix Failed", githubFixFailed.length],
+                    ["fixed", "Fixed", githubFixed.length],
+                    ["already_addressed", "Addressed", githubAlreadyAddressed.length],
+                    ["dismissed", "Dismissed", githubDismissedByAnalysis.length],
+                    ["other", "Other", githubOtherComments.length],
+                  ] as const).map(([value, label, count]) => (
+                    <Button
+                      key={value}
+                      variant={githubFilter === value ? "secondary" : "outline"}
+                      size="sm"
+                      className="h-7 text-[11px]"
+                      onClick={() => setGithubFilter(value)}
+                    >
+                      {label} ({count})
+                    </Button>
                   ))}
-                </CollapsibleSection>
+                </div>
 
-                <CollapsibleSection title="Fixed" count={githubFixed.length} color="fixed" defaultOpen={false}>
-                  {githubFixed.map((comment) => (
+                {visibleGithubComments.map((comment) => {
+                  const isBotComment = botUsers.includes(comment.user);
+                  const selectedCategory = comment.analysisCategory ?? "UNTRIAGED";
+                  return (
                     <Card key={comment._id} className="border-white/8 bg-zinc-900/55 p-4">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">{comment.user}</Badge>
-                        <CommentTypeBadge type={comment.type} />
-                        {comment.path ? <Badge variant="outline">{comment.path}{comment.line ? `:${comment.line}` : ""}</Badge> : null}
-                        <Badge variant="fixed">Fixed</Badge>
-                        {comment.analysisCategory ? (
-                          <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
-                            {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
-                          </Badge>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="outline">{comment.user}</Badge>
+                            <CommentTypeBadge type={comment.type} />
+                            {comment.path ? <Badge variant="outline">{comment.path}{comment.line ? `:${comment.line}` : ""}</Badge> : null}
+                            {isBotComment ? <Badge variant="outline">{comment.status}</Badge> : null}
+                            {comment.analysisCategory ? (
+                              <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
+                                {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
+                              </Badge>
+                            ) : null}
+                            <span className="text-xs text-muted-foreground">{formatTimestamp(comment.updatedAt)}</span>
+                          </div>
+                        </div>
+                        {isBotComment ? (
+                          <Select
+                            value={selectedCategory}
+                            onValueChange={(value) => {
+                              if (value === "UNTRIAGED") return;
+                              void handleRecategorizeGithubComment(
+                                comment._id,
+                                value as "MUST_FIX" | "SHOULD_FIX" | "NICE_TO_HAVE" | "DISMISS" | "ALREADY_ADDRESSED",
+                              );
+                            }}
+                          >
+                            <SelectTrigger className="h-8 w-[170px] bg-transparent text-xs">
+                              <SelectValue placeholder="Set category" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="UNTRIAGED">Pending Triage</SelectItem>
+                              <SelectItem value="MUST_FIX">Must Fix</SelectItem>
+                              <SelectItem value="SHOULD_FIX">Should Fix</SelectItem>
+                              <SelectItem value="NICE_TO_HAVE">Nice to Have</SelectItem>
+                              <SelectItem value="ALREADY_ADDRESSED">Already Addressed</SelectItem>
+                              <SelectItem value="DISMISS">Dismiss</SelectItem>
+                            </SelectContent>
+                          </Select>
                         ) : null}
                       </div>
                       <div className="mt-3 text-sm leading-6 text-foreground/88">
                         <MarkdownBody text={comment.body} />
                       </div>
-                      <AnalysisDetailsPanel analysisReasoning={comment.analysisReasoning} analysisDetails={comment.analysisDetails} />
+                      {isBotComment ? (
+                        <AnalysisDetailsPanel
+                          analysisReasoning={comment.analysisReasoning}
+                          analysisDetails={comment.analysisDetails}
+                        />
+                      ) : null}
                       {comment.fixCommitHash ? (
                         <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
                           <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>
                           <p className="mt-2 text-sm leading-6">
                             Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
+                            {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
                           </p>
+                          {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
+                            <p className="mt-1 text-xs text-sky-100/80">
+                              {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
+                              {comment.fixFilesChanged.length > 4 ? "..." : ""}
+                            </p>
+                          ) : null}
                         </div>
                       ) : null}
                       {comment.repliedAt ? (
@@ -1593,8 +1633,8 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                         </div>
                       ) : null}
                     </Card>
-                  ))}
-                </CollapsibleSection>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1661,124 +1701,78 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             ) : null}
             {reviewComments && reviewComments.length > 0 ? (
               <div className="mt-3 space-y-3">
-                <CollapsibleSection title="Pending Triage" count={reviewPending.length} color="muted">
-                  {reviewPending.map((comment) => (
-                    <Card key={comment._id} className="border-white/8 bg-black/10 px-3 py-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">{getAgentLabel(comment.reviewerId)}</Badge>
-                        <Badge variant="outline">{comment.path}:{comment.line}</Badge>
-                        <Badge variant="outline">{comment.status}</Badge>
-                      </div>
-                      <div className="mt-3 text-sm leading-6 text-foreground/88">
-                        <MarkdownBody text={comment.body} />
-                      </div>
-                    </Card>
-                  ))}
-                </CollapsibleSection>
-
-                <CollapsibleSection
-                  title="Triaged"
-                  count={reviewMustFix.length + reviewShouldFix.length + reviewNiceToHave.length + reviewFixing.length + reviewFixFailed.length + reviewAlreadyAddressed.length + reviewDismissedByAnalysis.length}
-                  color="must_fix"
-                  badge={
-                    <span className="ml-1 flex gap-1">
-                      {reviewMustFix.length > 0 ? <Badge variant="must_fix">{reviewMustFix.length} must fix</Badge> : null}
-                      {reviewShouldFix.length > 0 ? <Badge variant="should_fix">{reviewShouldFix.length} should fix</Badge> : null}
-                      {reviewFixFailed.length > 0 ? <Badge variant="fix_failed">{reviewFixFailed.length} failed</Badge> : null}
-                    </span>
-                  }
-                >
+                <div className="flex flex-wrap gap-2">
                   {([
-                    ["Fixing", reviewFixing, "fixing"],
-                    ["Must Fix", reviewMustFix, "must_fix"],
-                    ["Should Fix", reviewShouldFix, "should_fix"],
-                    ["Nice to Have", reviewNiceToHave, "nice_to_have"],
-                    ["Fix Failed", reviewFixFailed, "fix_failed"],
-                    ["Already Addressed", reviewAlreadyAddressed, "already_addressed"],
-                    ["Dismissed by Analysis", reviewDismissedByAnalysis, "dismiss"],
-                  ] as const).map(([title, group, color]) => (
-                    <CollapsibleSection key={title} title={title} count={group.length} color={color as SectionColor} embedded defaultOpen={title === "Must Fix" || title === "Should Fix" || title === "Fixing"}>
-                      {group.map((comment) => (
-                        <Card key={comment._id} className="border-white/8 bg-black/10 px-3 py-3">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant="outline">{getAgentLabel(comment.reviewerId)}</Badge>
-                            <Badge variant="outline">{comment.path}:{comment.line}</Badge>
-                            <Badge variant="outline">{comment.status}</Badge>
-                            {comment.analysisCategory ? (
-                              <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
-                                {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
-                              </Badge>
-                            ) : null}
-                          </div>
-                          <div className="mt-3 text-sm leading-6 text-foreground/88">
-                            <MarkdownBody text={comment.body} />
-                          </div>
-                          <ReviewerSignalPanel
-                            reviewSeverity={comment.reviewSeverity}
-                            reviewConfidence={comment.reviewConfidence}
-                            reviewEvidence={comment.reviewEvidence}
-                          />
-                          <AnalysisDetailsPanel
-                            analysisReasoning={comment.analysisReasoning}
-                            analysisDetails={comment.analysisDetails}
-                            suggestion={comment.suggestion}
-                          />
-                          {comment.fixCommitHash ? (
-                            <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
-                              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>
-                              <p className="mt-2 text-sm leading-6">
-                                Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
-                                {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
-                              </p>
-                              {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
-                                <p className="mt-1 text-xs text-sky-100/80">
-                                  {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
-                                  {comment.fixFilesChanged.length > 4 ? "..." : ""}
-                                </p>
-                              ) : null}
-                            </div>
-                          ) : null}
-                          {comment.publishedAt ? (
-                            <div className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-sm text-violet-100/90">
-                              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">Published</p>
-                              <p className="mt-2 text-sm leading-6">Sent to GitHub on {formatTimestamp(comment.publishedAt)}</p>
-                            </div>
-                          ) : null}
-                        </Card>
-                      ))}
-                    </CollapsibleSection>
+                    ["all", "All", reviewComments?.length ?? 0],
+                    ["pending", "Pending", reviewPending.length],
+                    ["must_fix", "Must Fix", reviewMustFix.length],
+                    ["should_fix", "Should Fix", reviewShouldFix.length],
+                    ["nice_to_have", "Nice to Have", reviewNiceToHave.length],
+                    ["fix_failed", "Fix Failed", reviewFixFailed.length],
+                    ["fixed", "Fixed", reviewFixed.length],
+                    ["already_addressed", "Addressed", reviewAlreadyAddressed.length],
+                    ["dismissed", "Dismissed", reviewDismissedByAnalysis.length],
+                  ] as const).map(([value, label, count]) => (
+                    <Button
+                      key={value}
+                      variant={reviewFilter === value ? "secondary" : "outline"}
+                      size="sm"
+                      className="h-7 text-[11px]"
+                      onClick={() => setReviewFilter(value)}
+                    >
+                      {label} ({count})
+                    </Button>
                   ))}
-                </CollapsibleSection>
+                </div>
 
-                <CollapsibleSection title="Fixed" count={reviewFixed.length} color="fixed" defaultOpen={false}>
-                  {reviewFixed.map((comment) => (
-                    <Card key={comment._id} className="border-white/8 bg-black/10 px-3 py-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">{getAgentLabel(comment.reviewerId)}</Badge>
-                        <Badge variant="outline">{comment.path}:{comment.line}</Badge>
-                        <Badge variant="fixed">Fixed</Badge>
-                        {comment.analysisCategory ? (
-                          <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
-                            {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
-                          </Badge>
+                {visibleReviewComments.map((comment) => (
+                  <Card key={comment._id} className="border-white/8 bg-black/10 px-3 py-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline">{getAgentLabel(comment.reviewerId)}</Badge>
+                      <Badge variant="outline">{comment.path}:{comment.line}</Badge>
+                      <Badge variant="outline">{comment.status}</Badge>
+                      {comment.analysisCategory ? (
+                        <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
+                          {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
+                        </Badge>
+                      ) : null}
+                    </div>
+                    <div className="mt-3 text-sm leading-6 text-foreground/88">
+                      <MarkdownBody text={comment.body} />
+                    </div>
+                    <ReviewerSignalPanel
+                      reviewSeverity={comment.reviewSeverity}
+                      reviewConfidence={comment.reviewConfidence}
+                      reviewEvidence={comment.reviewEvidence}
+                    />
+                    <AnalysisDetailsPanel
+                      analysisReasoning={comment.analysisReasoning}
+                      analysisDetails={comment.analysisDetails}
+                      suggestion={comment.suggestion}
+                    />
+                    {comment.fixCommitHash ? (
+                      <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>
+                        <p className="mt-2 text-sm leading-6">
+                          Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
+                          {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
+                        </p>
+                        {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
+                          <p className="mt-1 text-xs text-sky-100/80">
+                            {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
+                            {comment.fixFilesChanged.length > 4 ? "..." : ""}
+                          </p>
                         ) : null}
                       </div>
-                      <div className="mt-3 text-sm leading-6 text-foreground/88">
-                        <MarkdownBody text={comment.body} />
+                    ) : null}
+                    {comment.publishedAt ? (
+                      <div className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-sm text-violet-100/90">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">Published</p>
+                        <p className="mt-2 text-sm leading-6">Sent to GitHub on {formatTimestamp(comment.publishedAt)}</p>
                       </div>
-                      <ReviewerSignalPanel
-                        reviewSeverity={comment.reviewSeverity}
-                        reviewConfidence={comment.reviewConfidence}
-                        reviewEvidence={comment.reviewEvidence}
-                      />
-                      <AnalysisDetailsPanel
-                        analysisReasoning={comment.analysisReasoning}
-                        analysisDetails={comment.analysisDetails}
-                        suggestion={comment.suggestion}
-                      />
-                    </Card>
-                  ))}
-                </CollapsibleSection>
+                    ) : null}
+                  </Card>
+                ))}
               </div>
             ) : (
               <p className="mt-3 text-sm text-muted-foreground">No review comments stored in Convex yet.</p>
@@ -1809,12 +1803,19 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               : null;
             const hasParameters = parameters && Object.keys(parameters).length > 0;
             const detailSummary = formatTimelineDetail(selectedTimelineEvent);
+            const selectedTimelineConfig = getTimelineConfig(selectedTimelineEvent.eventType);
+            const selectedTimelineTone = getTimelineToneClasses(selectedTimelineConfig.tone);
 
             return (
               <div className="space-y-4">
                 {detailSummary ? (
-                  <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3 text-sm text-muted-foreground">
-                    {detailSummary}
+                  <div className={cn("rounded-lg border px-3 py-3 text-sm text-muted-foreground", selectedTimelineTone.card)}>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className={cn("h-5 px-2 text-[10px] uppercase tracking-wide", selectedTimelineTone.badge)}>
+                        {selectedTimelineConfig.toneLabel}
+                      </Badge>
+                    </div>
+                    <p className="mt-2">{detailSummary}</p>
                   </div>
                 ) : null}
 
