@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { App } from "@/App";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Popover } from "@/components/ui/popover";
 import { hasCloudEnv, missingCloudEnv } from "@/lib/cloud";
 import { api } from "../../convex/_generated/api";
 import { CodeBlock } from "@/components/CodeBlock";
@@ -27,6 +28,7 @@ function CloudStatusCard() {
   const workspaces = useQuery(api.workspaces.listForCurrentUser);
   const activeWorkspaceId = workspaces?.[0]?._id;
   const [copied, setCopied] = useState(false);
+  const [open, setOpen] = useState(false);
   const createEnrollmentToken = useMutation(api.machines.createEnrollmentToken);
   const revokeEnrollmentToken = useMutation(api.machines.revokeEnrollmentToken);
   const machines = useQuery(
@@ -68,21 +70,40 @@ function CloudStatusCard() {
   };
 
   return (
-    <div className="pointer-events-none absolute left-3 top-3 z-50 max-w-sm">
-      <Card className="pointer-events-auto border-primary/20 bg-card/92 shadow-2xl backdrop-blur">
-        <CardHeader className="pb-3">
-          <div className="flex items-center gap-2 text-primary">
-            <ServerCog className="h-4 w-4" />
-            <CardTitle>Cloud Control Plane</CardTitle>
+    <Popover
+      open={open}
+      onOpenChange={setOpen}
+      align="right"
+      className="min-w-0"
+      contentContainerClassName="absolute right-0 top-full mt-2"
+      contentClassName="w-[24rem] max-w-[calc(100vw-1.5rem)]"
+      content={
+        <div className="space-y-3 p-4 text-sm text-muted-foreground">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <ServerCog className="h-4 w-4 text-primary" />
+                Cloud Control Plane
+              </p>
+              <p className="mt-1 text-xs leading-5">
+                Convex is linked and Clerk-authenticated. Machines enroll locally, then heartbeat
+                back to this workspace.
+              </p>
+            </div>
+            <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>
+              Close
+            </Button>
           </div>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm text-muted-foreground">
-          <div>
+
+          <div className="rounded-lg border border-border/70 bg-background/50 px-3 py-2.5">
             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">
               Signed In As
             </p>
-            <p>{viewer.user.name ?? viewer.user.email ?? viewer.identity.subject}</p>
+            <p className="mt-1 truncate text-sm text-foreground">
+              {viewer.user.name ?? viewer.user.email ?? viewer.identity.subject}
+            </p>
           </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-lg border border-border/70 bg-background/50 p-3">
               <div className="mb-1 flex items-center gap-2 text-foreground/80">
@@ -91,9 +112,7 @@ function CloudStatusCard() {
                   Workspaces
                 </span>
               </div>
-              <p className="text-lg font-semibold text-foreground">
-                {workspaces?.length ?? 0}
-              </p>
+              <p className="text-lg font-semibold text-foreground">{workspaces?.length ?? 0}</p>
             </div>
             <div className="rounded-lg border border-border/70 bg-background/50 p-3">
               <div className="mb-1 flex items-center gap-2 text-foreground/80">
@@ -102,16 +121,10 @@ function CloudStatusCard() {
                   Machines
                 </span>
               </div>
-              <p className="text-lg font-semibold text-foreground">
-                {machines?.length ?? 0}
-              </p>
+              <p className="text-lg font-semibold text-foreground">{machines?.length ?? 0}</p>
             </div>
           </div>
-          <p className="text-xs leading-5">
-            Convex is linked and Clerk-authenticated. Use a one-time enrollment token to attach a
-            machine, then the worker will persist its machine credential locally and heartbeat back
-            to this workspace.
-          </p>
+
           <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
@@ -129,6 +142,7 @@ function CloudStatusCard() {
                 Token
               </Button>
             </div>
+
             {latestToken ? (
               <div className="space-y-2">
                 <div className="rounded-md border border-border/70 bg-card/80 px-3 py-2">
@@ -140,6 +154,7 @@ function CloudStatusCard() {
                     Expires at {new Date(latestToken.expiresAt).toLocaleString()}
                   </p>
                 </div>
+
                 {workerSnippet ? (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
@@ -176,9 +191,33 @@ function CloudStatusCard() {
               </p>
             )}
           </div>
-        </CardContent>
-      </Card>
-    </div>
+        </div>
+      }
+    >
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        className={`flex min-w-0 items-center gap-3 rounded-full border px-3 py-2 text-left shadow-lg backdrop-blur transition-colors ${
+          open
+            ? "border-primary/35 bg-card/95"
+            : "border-border/80 bg-card/88 hover:bg-card"
+        }`}
+      >
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-primary/20 bg-primary/10 text-primary">
+          <ServerCog className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+            Cloud
+          </p>
+          <p className="truncate text-sm font-medium text-foreground">
+            {machines?.length ?? 0} machines in {workspaces?.length ?? 0} workspace
+            {(workspaces?.length ?? 0) === 1 ? "" : "s"}
+          </p>
+        </div>
+      </button>
+    </Popover>
   );
 }
 
@@ -186,10 +225,12 @@ function SignedInApp() {
   return (
     <div className="relative h-screen">
       <CloudBootstrap />
-      <CloudStatusCard />
       <div className="pointer-events-none absolute inset-x-0 top-3 z-50 flex justify-end px-3">
-        <div className="pointer-events-auto rounded-full border border-border bg-card/90 p-1 shadow-lg backdrop-blur">
-          <UserButton />
+        <div className="pointer-events-auto flex items-start gap-2">
+          <CloudStatusCard />
+          <div className="rounded-full border border-border bg-card/90 p-1 shadow-lg backdrop-blur">
+            <UserButton />
+          </div>
         </div>
       </div>
       <App />

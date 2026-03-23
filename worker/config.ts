@@ -29,9 +29,20 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function requireFirstEnv(names: string[]): string {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value) {
+      return value;
+    }
+  }
+
+  throw new Error(`${names.join(" or ")} is required to start the worker scaffold.`);
+}
+
 export function loadWorkerConfig(): WorkerConfig {
   return {
-    convexUrl: requireEnv("CONVEX_URL"),
+    convexUrl: requireFirstEnv(["CONVEX_URL", "VITE_CONVEX_URL"]),
     workspaceId: requireEnv("WORKER_WORKSPACE_ID"),
     machineName: process.env.WORKER_MACHINE_NAME ?? "Unnamed Machine",
     machineSlug: process.env.WORKER_MACHINE_SLUG ?? "unnamed-machine",
