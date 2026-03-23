@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "convex/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronRight, Clock3, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, History, Loader2, MessageSquareReply, Minus, Plus, RefreshCw, Sparkles, Trash2, Upload, Users, Wrench, X } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
@@ -247,6 +247,69 @@ function AgentInlineLabel({
         {getAgentLabel(agent)}
       </span>
     </span>
+  );
+}
+
+function PreferredAgentSelect({
+  value,
+  options,
+  onChange,
+}: {
+  value: "claude" | "codex" | "";
+  options: Array<"claude" | "codex">;
+  onChange: (value: "claude" | "codex") => void;
+}) {
+  const measureRef = useRef<HTMLDivElement>(null);
+  const [triggerWidth, setTriggerWidth] = useState(232);
+
+  useLayoutEffect(() => {
+    if (!value || !measureRef.current) {
+      return;
+    }
+
+    const nextWidth = Math.ceil(measureRef.current.getBoundingClientRect().width) + 52;
+    setTriggerWidth(nextWidth);
+  }, [value]);
+
+  if (options.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="relative shrink-0">
+      <div className="pointer-events-none absolute -left-[9999px] top-0 opacity-0" aria-hidden="true">
+        <div
+          ref={measureRef}
+          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-2 text-xs leading-none"
+        >
+          <AgentLogo agent={value || options[0]} className="h-3.5 w-3.5 shrink-0" />
+          <span>Preferred agent {getAgentLabel(value || options[0])}</span>
+        </div>
+      </div>
+
+      <Select value={value} onValueChange={(next) => onChange(next as "claude" | "codex")}>
+        <SelectTrigger
+          className="h-8 w-auto min-w-0 bg-transparent text-xs transition-[width] duration-200 ease-out"
+          style={{ width: `${triggerWidth}px` }}
+        >
+          {value ? (
+            <div className="flex min-w-0 items-center gap-1.5 pr-3 leading-none">
+              <AgentLogo agent={value} className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">Preferred agent {getAgentLabel(value)}</span>
+            </div>
+          ) : (
+            <SelectValue placeholder="Preferred agent" />
+          )}
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((agent) => (
+            <SelectItem key={`preferred-agent-${agent}`} value={agent}>
+              <AgentInlineLabel agent={agent} />
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 
@@ -1731,28 +1794,11 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 {selectedMachineSlug && availableAnalyzerAgents.length > 0 ? (
-                    <Select
-                      value={preferredActionAgent}
-                      onValueChange={(value) => setPreferredActionAgent(value as "claude" | "codex")}
-                    >
-                      <SelectTrigger className="h-8 w-[240px] bg-transparent text-xs">
-                        {preferredActionAgent ? (
-                          <span className="flex min-w-0 flex-1 items-center gap-1.5 pr-4">
-                            <AgentLogo agent={preferredActionAgent} className="h-3.5 w-3.5 shrink-0" />
-                            <span className="truncate">Preferred agent {getAgentLabel(preferredActionAgent)}</span>
-                          </span>
-                        ) : (
-                          <SelectValue placeholder="Preferred agent" />
-                        )}
-                      </SelectTrigger>
-                    <SelectContent>
-                      {availableAnalyzerAgents.map((agent) => (
-                        <SelectItem key={`github-action-agent-${agent}`} value={agent}>
-                          {getAgentLabel(agent)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <PreferredAgentSelect
+                    value={preferredActionAgent}
+                    options={availableAnalyzerAgents}
+                    onChange={setPreferredActionAgent}
+                  />
                 ) : null}
                 {selectedMachineSlug && preferredActionAgent && pendingGithubCommentCount > 0 ? (
                   <Button size="sm" onClick={() => void handleAnalyzeGithubComments(preferredActionAgent)}>
@@ -1898,34 +1944,17 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
                     Actions
                   </div>
-                  <span className="text-[11px] text-muted-foreground/70">
-                    Using {selectedMachineRecord.name}
-                  </span>
-                </div>
+                <span className="text-[11px] text-muted-foreground/70">
+                  Using {selectedMachineRecord.name}
+                </span>
+              </div>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   {selectedMachineSlug && availableAnalyzerAgents.length > 0 ? (
-                    <Select
+                    <PreferredAgentSelect
                       value={preferredActionAgent}
-                      onValueChange={(value) => setPreferredActionAgent(value as "claude" | "codex")}
-                    >
-                      <SelectTrigger className="h-8 w-[240px] bg-transparent text-xs">
-                        {preferredActionAgent ? (
-                          <span className="flex min-w-0 flex-1 items-center gap-1.5 pr-4">
-                            <AgentLogo agent={preferredActionAgent} className="h-3.5 w-3.5 shrink-0" />
-                            <span className="truncate">Preferred agent {getAgentLabel(preferredActionAgent)}</span>
-                          </span>
-                        ) : (
-                          <SelectValue placeholder="Preferred agent" />
-                        )}
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableAnalyzerAgents.map((agent) => (
-                          <SelectItem key={`review-action-agent-${agent}`} value={agent}>
-                            {getAgentLabel(agent)}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      options={availableAnalyzerAgents}
+                      onChange={setPreferredActionAgent}
+                    />
                   ) : null}
                   {selectedMachineSlug && preferredActionAgent && reviewPending.length > 0 ? (
                     <Button size="sm" onClick={() => void handleAnalyzePendingReviewComments(preferredActionAgent)}>
