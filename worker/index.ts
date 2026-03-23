@@ -559,8 +559,6 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
         "list",
         "--repo",
         repoLabel,
-        "--author",
-        "@me",
         "--state",
         "open",
         "--json",

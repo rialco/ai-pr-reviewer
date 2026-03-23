@@ -114,7 +114,7 @@ export function describeMergeBlockage(
 export async function listOpenPRs(repo: RepoConfig): Promise<PRInfo[]> {
   try {
     const raw = await gh(
-      `pr list --repo ${repo.label} --author @me --state open --json number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,author,createdAt,updatedAt`,
+      `pr list --repo ${repo.label} --state open --json number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,author,createdAt,updatedAt`,
     );
     const prs = JSON.parse(raw) as Array<{
       number: number;
