@@ -386,8 +386,8 @@ function LegacyLocalMode() {
           </CardHeader>
           <CardContent className="space-y-3 text-sm text-muted-foreground">
             <p>
-              Cloud auth is not configured yet, so the existing local backend stays active in this
-              branch while Clerk and Convex are wired in.
+              Cloud auth is not configured yet, so the app falls back to the original local-only
+              backend and skips the Clerk + Convex control plane.
             </p>
             <div>
               <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-foreground/80">
@@ -434,8 +434,8 @@ function SignInScreen() {
         <CardContent className="space-y-5">
           <p className="text-sm leading-6 text-muted-foreground">
             The control plane moves to Clerk and Convex, but execution stays on your linked
-            machines. Sign in here to access repo state, PR status, jobs, and machine availability
-            from anywhere.
+            machines. Sign in here to access repo state, PR status, comments, fixes, jobs, and
+            machine availability from anywhere.
           </p>
           <div className="flex flex-wrap gap-3">
             <SignInButton mode="modal">

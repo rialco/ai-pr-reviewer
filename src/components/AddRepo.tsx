@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { FolderOpen, Loader2, Plus } from "lucide-react";
 import { api } from "../../convex/_generated/api";
-import { useAddRepo, useGitRemote } from "../hooks/useApi";
+import { useGitRemote, useAddRepo } from "../hooks/useApi";
 import { hasCloudEnv } from "../lib/cloud";
 import { RepoDirectoryBrowser } from "./RepoDirectoryBrowser";
 import { Button } from "./ui/button";
@@ -143,7 +143,6 @@ function CloudAddRepo() {
   );
   const upsertRepo = useMutation(api.repos.upsert);
   const upsertMachineConfig = useMutation(api.repos.upsertMachineConfig);
-  const addRepo = useAddRepo();
   const { data: gitRemote, isLoading: isLoadingRemote, error: gitRemoteError } = useGitRemote(selectedPath);
 
   useEffect(() => {
@@ -185,16 +184,6 @@ function CloudAddRepo() {
         localPath: selectedPath,
         skipTypecheck: false,
       });
-
-      try {
-        await addRepo.mutateAsync({
-          owner: gitRemote.owner,
-          repo: gitRemote.repo,
-          localPath: selectedPath,
-        });
-      } catch {
-        // Keep cloud registration successful even if the legacy local mirror is unavailable.
-      }
 
       resetDialog();
     } finally {

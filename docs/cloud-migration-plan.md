@@ -90,19 +90,19 @@ Each machine should eventually have:
 
 ## Current Branch Status
 
-This branch intentionally keeps the existing Express app usable while the cloud control plane is introduced in parallel.
+This branch keeps the existing Express app available as a fallback when cloud env vars are missing, but cloud mode itself is now end-to-end for the main PR workflow.
 
 That means:
 
-- The old local REST workflow still exists.
-- The new Convex data model runs in parallel as the cloud control plane.
-- Worker enrollment and heartbeat reporting are implemented.
-- The first machine-scoped cloud job is a safe self-check used to validate claim and completion flow.
+- The old local REST workflow still exists as a non-cloud fallback.
+- Cloud mode reads repos, PRs, comments, timeline, jobs, and machines from Convex.
+- Worker enrollment, heartbeats, job claiming, and run logs are implemented.
+- Cloud jobs now cover repo sync, PR refresh, local AI reviews, local review triage/fix/publish, and GitHub comment triage/fix/reply.
+- Repository onboarding in cloud mode is machine-bound and no longer mirrors repo state back into SQLite.
 
 ## Immediate Next Steps
 
-1. Run a worker with `WORKER_ENROLLMENT_TOKEN=... pnpm dev:worker`.
-2. Confirm the machine appears in the cloud popover and heartbeats update.
-3. Queue a machine self-check from the cloud popover and verify it moves from `queued` to `running` to `done`.
-4. Extend the machine job payloads from self-check to real local actions like repo sync and PR refresh.
-5. Start migrating selected REST-backed UI reads to Convex subscriptions.
+1. Tighten the cloud UX so machine selection, job state, and action affordances feel unified instead of transitional.
+2. Decide whether legacy local-only routes remain as fallback mode or should start being removed from this branch.
+3. Formalize the GitHub identity model for cloud sync versus local machine writes.
+4. Add more machine/workspace management controls such as machine renaming, lease visibility, and stale-session recovery.
