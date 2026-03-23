@@ -481,22 +481,29 @@ function ReviewerSignalPanel({
         </div>
         {expanded ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/70" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/70" />}
       </button>
-      {expanded ? (
-        <>
-          {reviewEvidence?.riskSummary ? (
-            <div><span className="font-medium text-foreground">Risk:</span> {reviewEvidence.riskSummary}</div>
-          ) : null}
-          {joinMeta(reviewEvidence?.filesRead) ? (
-            <div><span className="font-medium text-foreground">Files:</span> {joinMeta(reviewEvidence?.filesRead)}</div>
-          ) : null}
-          {joinMeta(reviewEvidence?.changedLinesChecked) ? (
-            <div><span className="font-medium text-foreground">Changed lines:</span> {joinMeta(reviewEvidence?.changedLinesChecked)}</div>
-          ) : null}
-          {joinMeta(reviewEvidence?.ruleReferences) ? (
-            <div><span className="font-medium text-foreground">References:</span> {joinMeta(reviewEvidence?.ruleReferences)}</div>
-          ) : null}
-        </>
-      ) : null}
+      <div
+        className={cn(
+          "grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-out",
+          expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+        )}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="space-y-1.5 pt-3">
+            {reviewEvidence?.riskSummary ? (
+              <div><span className="font-medium text-foreground">Risk:</span> {reviewEvidence.riskSummary}</div>
+            ) : null}
+            {joinMeta(reviewEvidence?.filesRead) ? (
+              <div><span className="font-medium text-foreground">Files:</span> {joinMeta(reviewEvidence?.filesRead)}</div>
+            ) : null}
+            {joinMeta(reviewEvidence?.changedLinesChecked) ? (
+              <div><span className="font-medium text-foreground">Changed lines:</span> {joinMeta(reviewEvidence?.changedLinesChecked)}</div>
+            ) : null}
+            {joinMeta(reviewEvidence?.ruleReferences) ? (
+              <div><span className="font-medium text-foreground">References:</span> {joinMeta(reviewEvidence?.ruleReferences)}</div>
+            ) : null}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
