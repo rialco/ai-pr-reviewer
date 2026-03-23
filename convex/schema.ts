@@ -72,6 +72,7 @@ export default defineSchema({
     repoLabel: v.string(),
     prNumber: v.number(),
     title: v.string(),
+    body: v.optional(v.string()),
     url: v.string(),
     author: v.string(),
     headRefName: v.optional(v.string()),
@@ -103,6 +104,19 @@ export default defineSchema({
     ),
     reviewCycle: v.optional(v.number()),
     confidenceScore: v.optional(v.number()),
+    additions: v.optional(v.number()),
+    deletions: v.optional(v.number()),
+    changedFiles: v.optional(v.number()),
+    commitCount: v.optional(v.number()),
+    files: v.optional(
+      v.array(
+        v.object({
+          path: v.string(),
+          additions: v.number(),
+          deletions: v.number(),
+        }),
+      ),
+    ),
     lastFixedAt: v.optional(v.string()),
     lastReReviewAt: v.optional(v.string()),
     createdAt: v.string(),

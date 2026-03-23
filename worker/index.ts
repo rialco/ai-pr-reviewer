@@ -92,6 +92,23 @@ interface ClaimedMachineJob {
   payload: unknown;
 }
 
+interface SyncSnapshotComment {
+  githubCommentId: number;
+  type: "inline" | "review" | "issue_comment";
+  user: string;
+  body: string;
+  path?: string;
+  line?: number;
+  diffHunk?: string;
+  githubUrl?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function parseJson<T>(value: string): T {
+  return JSON.parse(value) as T;
+}
+
 async function executeJob(client: ConvexHttpClient, session: WorkerSession, job: ClaimedMachineJob) {
   const payload =
     job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
@@ -138,10 +155,12 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
   if (job.kind === "sync_repo") {
     const repoId = typeof payload?.repoId === "string" ? (payload.repoId as Id<"repos">) : null;
     const repoLabel = typeof payload?.repoLabel === "string" ? payload.repoLabel : null;
+    const owner = typeof payload?.owner === "string" ? payload.owner : null;
+    const repoName = typeof payload?.repo === "string" ? payload.repo : null;
     const localPath = typeof payload?.localPath === "string" ? payload.localPath : null;
 
-    if (!repoId || !repoLabel || !localPath) {
-      throw new Error("sync_repo payload is missing repoId, repoLabel, or localPath.");
+    if (!repoId || !repoLabel || !owner || !repoName || !localPath) {
+      throw new Error("sync_repo payload is missing repoId, repoLabel, owner, repo, or localPath.");
     }
 
     if (!fs.existsSync(localPath)) {
@@ -171,7 +190,7 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
       ],
       { cwd: localPath },
     );
-    const openPrs = JSON.parse(prListJson) as Array<{
+    const openPrs = parseJson<Array<{
       number: number;
       title: string;
       url: string;
@@ -191,23 +210,141 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
       author?: { login?: string | null } | null;
       createdAt: string;
       updatedAt: string;
-    }>;
+    }>>(prListJson);
+
+    const syncSnapshots = await Promise.all(
+      openPrs.map(async (pr) => {
+        const prViewJson = runCommand(
+          "gh",
+          [
+            "pr",
+            "view",
+            String(pr.number),
+            "--repo",
+            repoLabel,
+            "--json",
+            "number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,author,createdAt,updatedAt,additions,deletions,changedFiles,commits,files",
+          ],
+          { cwd: localPath },
+        );
+        const issueCommentsJson = runCommand(
+          "gh",
+          ["api", `repos/${owner}/${repoName}/issues/${pr.number}/comments?per_page=100`],
+          { cwd: localPath },
+        );
+        const reviewCommentsJson = runCommand(
+          "gh",
+          ["api", `repos/${owner}/${repoName}/pulls/${pr.number}/comments?per_page=100`],
+          { cwd: localPath },
+        );
+
+        const prView = parseJson<{
+          number: number;
+          title: string;
+          body?: string;
+          url: string;
+          headRefName?: string;
+          baseRefName?: string;
+          mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | null;
+          mergeStateStatus?:
+            | "BEHIND"
+            | "BLOCKED"
+            | "CLEAN"
+            | "DIRTY"
+            | "DRAFT"
+            | "HAS_HOOKS"
+            | "UNKNOWN"
+            | "UNSTABLE"
+            | null;
+          author?: { login?: string | null } | null;
+          additions?: number;
+          deletions?: number;
+          changedFiles?: number;
+          commits?: Array<unknown>;
+          files?: Array<{
+            path?: string;
+            additions?: number;
+            deletions?: number;
+          }>;
+          createdAt: string;
+          updatedAt: string;
+        }>(prViewJson);
+        const issueComments = parseJson<Array<{
+          id: number;
+          body?: string | null;
+          html_url?: string | null;
+          user?: { login?: string | null } | null;
+          created_at: string;
+          updated_at: string;
+        }>>(issueCommentsJson);
+        const reviewComments = parseJson<Array<{
+          id: number;
+          body?: string | null;
+          html_url?: string | null;
+          path?: string | null;
+          line?: number | null;
+          diff_hunk?: string | null;
+          user?: { login?: string | null } | null;
+          created_at: string;
+          updated_at: string;
+        }>>(reviewCommentsJson);
+
+        const comments: SyncSnapshotComment[] = [
+          ...issueComments.map((comment) => ({
+            githubCommentId: comment.id,
+            type: "issue_comment" as const,
+            user: comment.user?.login ?? "unknown",
+            body: comment.body ?? "",
+            githubUrl: comment.html_url ?? undefined,
+            createdAt: comment.created_at,
+            updatedAt: comment.updated_at,
+          })),
+          ...reviewComments.map((comment) => ({
+            githubCommentId: comment.id,
+            type: comment.path ? "inline" as const : "review" as const,
+            user: comment.user?.login ?? "unknown",
+            body: comment.body ?? "",
+            path: comment.path ?? undefined,
+            line: comment.line ?? undefined,
+            diffHunk: comment.diff_hunk ?? undefined,
+            githubUrl: comment.html_url ?? undefined,
+            createdAt: comment.created_at,
+            updatedAt: comment.updated_at,
+          })),
+        ].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+        return {
+          number: prView.number,
+          title: prView.title,
+          body: prView.body ?? "",
+          url: prView.url,
+          headRefName: prView.headRefName,
+          baseRefName: prView.baseRefName,
+          mergeable: prView.mergeable ?? undefined,
+          mergeStateStatus: prView.mergeStateStatus ?? undefined,
+          author: prView.author?.login ?? "unknown",
+          additions: prView.additions ?? 0,
+          deletions: prView.deletions ?? 0,
+          changedFiles: prView.changedFiles ?? 0,
+          commitCount: Array.isArray(prView.commits) ? prView.commits.length : 0,
+          files: (prView.files ?? [])
+            .filter((file): file is { path: string; additions?: number; deletions?: number } => Boolean(file.path))
+            .map((file) => ({
+              path: file.path,
+              additions: file.additions ?? 0,
+              deletions: file.deletions ?? 0,
+            })),
+          comments,
+          createdAt: prView.createdAt,
+          updatedAt: prView.updatedAt,
+        };
+      }),
+    );
 
     await client.mutation(api.prs.upsertRepoSyncSnapshot, {
       machineToken: session.machineToken,
       repoId,
-      prs: openPrs.map((pr) => ({
-        number: pr.number,
-        title: pr.title,
-        url: pr.url,
-        headRefName: pr.headRefName,
-        baseRefName: pr.baseRefName,
-        mergeable: pr.mergeable ?? undefined,
-        mergeStateStatus: pr.mergeStateStatus ?? undefined,
-        author: pr.author?.login ?? "unknown",
-        createdAt: pr.createdAt,
-        updatedAt: pr.updatedAt,
-      })),
+      prs: syncSnapshots,
     });
 
     return {
@@ -216,10 +353,12 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
         `[sync_repo] repo=${repoLabel}`,
         `[sync_repo] localPath=${localPath}`,
         `[sync_repo] remote=${remoteUrl}`,
-        `[sync_repo] openPrCount=${openPrs.length}`,
+        `[sync_repo] openPrCount=${syncSnapshots.length}`,
         `[sync_repo] convexSnapshotUpdated=true`,
         `[sync_repo] branchStatus=${branchStatus.replaceAll("\n", " | ")}`,
-        ...openPrs.slice(0, 5).map((pr) => `[sync_repo] pr #${pr.number} ${pr.title}`),
+        ...syncSnapshots.slice(0, 5).map(
+          (pr) => `[sync_repo] pr #${pr.number} ${pr.title} comments=${pr.comments.length}`,
+        ),
       ],
       steps: [
         {
@@ -236,13 +375,13 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
         },
         {
           step: "query_open_prs",
-          detail: `${openPrs.length} open PR(s) visible through gh`,
+          detail: `${syncSnapshots.length} open PR(s) visible through gh`,
           status: "done" as const,
           ts: now,
         },
         {
           step: "persist_cloud_snapshot",
-          detail: `Updated Convex snapshot for ${openPrs.length} PR(s)`,
+          detail: `Updated Convex snapshot for ${syncSnapshots.length} PR(s)`,
           status: "done" as const,
           ts: now,
         },

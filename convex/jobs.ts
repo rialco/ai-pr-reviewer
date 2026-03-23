@@ -134,6 +134,55 @@ export const listRunsForWorkspace = query({
   },
 });
 
+export const listFeedForWorkspace = query({
+  args: {
+    workspaceId: v.id("workspaces"),
+  },
+  handler: async (ctx, args) => {
+    await requireWorkspaceAccess(ctx, args.workspaceId);
+
+    const [jobs, runs] = await Promise.all([
+      ctx.db
+        .query("jobs")
+        .withIndex("by_workspaceId_createdAt", (q) => q.eq("workspaceId", args.workspaceId))
+        .collect(),
+      ctx.db
+        .query("jobRuns")
+        .withIndex("by_workspaceId", (q) => q.eq("workspaceId", args.workspaceId))
+        .collect(),
+    ]);
+
+    const latestRunsByJobId = new Map<string, (typeof runs)[number]>();
+    for (const run of runs.sort((a, b) => b.startedAt.localeCompare(a.startedAt))) {
+      if (!latestRunsByJobId.has(run.jobId)) {
+        latestRunsByJobId.set(run.jobId, run);
+      }
+    }
+
+    const feed = await Promise.all(
+      jobs.map(async (job) => {
+        const repo = job.repoId ? await ctx.db.get(job.repoId) : null;
+        const pr = job.prId ? await ctx.db.get(job.prId) : null;
+        const payload =
+          job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
+            ? (job.payload as Record<string, unknown>)
+            : null;
+
+        return {
+          ...job,
+          repoLabel:
+            repo?.label ?? (typeof payload?.repoLabel === "string" ? payload.repoLabel : null),
+          prNumber:
+            pr?.prNumber ?? (typeof payload?.prNumber === "number" ? payload.prNumber : null),
+          latestRun: latestRunsByJobId.get(job._id) ?? null,
+        };
+      }),
+    );
+
+    return feed.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  },
+});
+
 export const enqueue = mutation({
   args: {
     workspaceId: v.id("workspaces"),

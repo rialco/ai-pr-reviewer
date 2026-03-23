@@ -5,8 +5,11 @@ import { CoordinatorDock } from "./components/CoordinatorDock";
 import { RepoList } from "./components/RepoList";
 import { PRList } from "./components/PRList";
 import { CommentView } from "./components/CommentView";
+import { CloudCommentView } from "./components/CloudCommentView";
 import { JobCenter } from "./components/JobCenter";
+import { CloudJobCenter } from "./components/CloudJobCenter";
 import { useSummary } from "./hooks/useApi";
+import { useActiveWorkspace } from "./hooks/useActiveWorkspace";
 import { hasCloudEnv } from "./lib/cloud";
 import { cn } from "./lib/utils";
 import { ChevronDown, ChevronRight, Github, MessageSquare } from "lucide-react";
@@ -23,8 +26,7 @@ function LocalRepoCountBadge() {
 }
 
 function CloudRepoCountBadge() {
-  const workspaces = useQuery(api.workspaces.listForCurrentUser);
-  const activeWorkspaceId = workspaces?.[0]?._id;
+  const { activeWorkspaceId } = useActiveWorkspace();
   const repos = useQuery(
     api.repos.listForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
@@ -43,8 +45,7 @@ function RepoCountBadge() {
 
 function useAppSummary() {
   if (hasCloudEnv) {
-    const workspaces = useQuery(api.workspaces.listForCurrentUser);
-    const activeWorkspaceId = workspaces?.[0]?._id;
+    const { activeWorkspaceId } = useActiveWorkspace();
     return useQuery(
       api.prs.dashboardSummary,
       activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
@@ -124,12 +125,21 @@ export function App() {
               open={footerPopover === "coordinator"}
               onOpenChange={(open) => setFooterPopover(open ? "coordinator" : null)}
             />
-            <JobCenter
-              open={footerPopover === "activity"}
-              onOpenChange={(open) => setFooterPopover(open ? "activity" : null)}
-              onNavigateToPR={(repo, prNumber) => setSelectedPR({ repo, prNumber })}
-              lastPollAt={summary?.lastPollAt ?? null}
-            />
+            {hasCloudEnv ? (
+              <CloudJobCenter
+                open={footerPopover === "activity"}
+                onOpenChange={(open) => setFooterPopover(open ? "activity" : null)}
+                onNavigateToPR={(repo, prNumber) => setSelectedPR({ repo, prNumber })}
+                lastPollAt={summary?.lastPollAt ?? null}
+              />
+            ) : (
+              <JobCenter
+                open={footerPopover === "activity"}
+                onOpenChange={(open) => setFooterPopover(open ? "activity" : null)}
+                onNavigateToPR={(repo, prNumber) => setSelectedPR({ repo, prNumber })}
+                lastPollAt={summary?.lastPollAt ?? null}
+              />
+            )}
           </div>
         </div>
       </aside>
@@ -141,7 +151,11 @@ export function App() {
             key={`${selectedPR.repo}:${selectedPR.prNumber}`}
             className="animate-enter-fade-slide"
           >
-            <CommentView repo={selectedPR.repo} prNumber={selectedPR.prNumber} />
+            {hasCloudEnv ? (
+              <CloudCommentView repo={selectedPR.repo} prNumber={selectedPR.prNumber} />
+            ) : (
+              <CommentView repo={selectedPR.repo} prNumber={selectedPR.prNumber} />
+            )}
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground">

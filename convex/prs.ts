@@ -3,6 +3,10 @@ import { mutation, query } from "./_generated/server";
 import { nowIso, requireWorkspaceAccess } from "./lib/auth";
 import { requireMachineByToken } from "./lib/machineAuth";
 
+function normalizeCommentStatus(status: string | undefined) {
+  return status ?? "new";
+}
+
 export const listForWorkspace = query({
   args: {
     workspaceId: v.id("workspaces"),
@@ -31,6 +35,60 @@ export const listForWorkspace = query({
 
       return b.updatedAt.localeCompare(a.updatedAt);
     });
+  },
+});
+
+export const getDetailForWorkspace = query({
+  args: {
+    workspaceId: v.id("workspaces"),
+    repoLabel: v.string(),
+    prNumber: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await requireWorkspaceAccess(ctx, args.workspaceId);
+
+    const repo = await ctx.db
+      .query("repos")
+      .withIndex("by_workspaceId_label", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("label", args.repoLabel),
+      )
+      .unique();
+
+    if (!repo || repo.archivedAt) {
+      return null;
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      return null;
+    }
+
+    const comments = await ctx.db
+      .query("githubComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+
+    return {
+      pr: {
+        ...pr,
+        body: pr.body ?? "",
+        additions: pr.additions ?? 0,
+        deletions: pr.deletions ?? 0,
+        changedFiles: pr.changedFiles ?? 0,
+        commitCount: pr.commitCount ?? 0,
+        files: pr.files ?? [],
+      },
+      comments: comments
+        .map((comment) => ({
+          ...comment,
+          status: normalizeCommentStatus(comment.status),
+        }))
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    };
   },
 });
 
@@ -90,6 +148,7 @@ export const upsertRepoSyncSnapshot = mutation({
       v.object({
         number: v.number(),
         title: v.string(),
+        body: v.optional(v.string()),
         url: v.string(),
         headRefName: v.optional(v.string()),
         baseRefName: v.optional(v.string()),
@@ -107,6 +166,35 @@ export const upsertRepoSyncSnapshot = mutation({
           ),
         ),
         author: v.string(),
+        additions: v.optional(v.number()),
+        deletions: v.optional(v.number()),
+        changedFiles: v.optional(v.number()),
+        commitCount: v.optional(v.number()),
+        files: v.optional(
+          v.array(
+            v.object({
+              path: v.string(),
+              additions: v.number(),
+              deletions: v.number(),
+            }),
+          ),
+        ),
+        comments: v.optional(
+          v.array(
+            v.object({
+              githubCommentId: v.number(),
+              type: v.union(v.literal("inline"), v.literal("review"), v.literal("issue_comment")),
+              user: v.string(),
+              body: v.string(),
+              path: v.optional(v.string()),
+              line: v.optional(v.number()),
+              diffHunk: v.optional(v.string()),
+              githubUrl: v.optional(v.string()),
+              createdAt: v.string(),
+              updatedAt: v.string(),
+            }),
+          ),
+        ),
         createdAt: v.string(),
         updatedAt: v.string(),
       }),
@@ -137,6 +225,7 @@ export const upsertRepoSyncSnapshot = mutation({
         repoLabel: repo.label,
         prNumber: incomingPr.number,
         title: incomingPr.title,
+        body: incomingPr.body,
         url: incomingPr.url,
         author: incomingPr.author,
         headRefName: incomingPr.headRefName,
@@ -146,18 +235,71 @@ export const upsertRepoSyncSnapshot = mutation({
         phase: existing?.phase ?? "polled",
         reviewCycle: existing?.reviewCycle ?? 0,
         confidenceScore: existing?.confidenceScore,
+        additions: incomingPr.additions,
+        deletions: incomingPr.deletions,
+        changedFiles: incomingPr.changedFiles,
+        commitCount: incomingPr.commitCount,
+        files: incomingPr.files,
         lastFixedAt: existing?.lastFixedAt,
         lastReReviewAt: existing?.lastReReviewAt,
         updatedAt: incomingPr.updatedAt,
       };
 
+      const prId = existing
+        ? existing._id
+        : await ctx.db.insert("prs", {
+            ...nextFields,
+            createdAt: incomingPr.createdAt,
+          });
+
       if (existing) {
         await ctx.db.patch(existing._id, nextFields);
-      } else {
-        await ctx.db.insert("prs", {
-          ...nextFields,
-          createdAt: incomingPr.createdAt,
-        });
+      }
+
+      const existingComments = await ctx.db
+        .query("githubComments")
+        .withIndex("by_prId", (q) => q.eq("prId", prId))
+        .collect();
+      const incomingComments = incomingPr.comments ?? [];
+      const incomingCommentIds = new Set(incomingComments.map((comment) => comment.githubCommentId));
+
+      for (const incomingComment of incomingComments) {
+        const existingComment = existingComments.find(
+          (comment) => comment.githubCommentId === incomingComment.githubCommentId,
+        );
+
+        const nextCommentFields = {
+          workspaceId: machine.workspaceId,
+          repoId: repo._id,
+          prId,
+          repoLabel: repo.label,
+          githubCommentId: incomingComment.githubCommentId,
+          type: incomingComment.type,
+          user: incomingComment.user,
+          body: incomingComment.body,
+          path: incomingComment.path,
+          line: incomingComment.line,
+          diffHunk: incomingComment.diffHunk,
+          status: normalizeCommentStatus(existingComment?.status),
+          githubUrl: incomingComment.githubUrl,
+          createdAt: incomingComment.createdAt,
+          updatedAt: incomingComment.updatedAt,
+        };
+
+        if (existingComment) {
+          await ctx.db.patch(existingComment._id, nextCommentFields);
+          continue;
+        }
+
+        await ctx.db.insert("githubComments", nextCommentFields);
+      }
+
+      for (const existingComment of existingComments) {
+        if (incomingCommentIds.has(existingComment.githubCommentId)) {
+          continue;
+        }
+
+        await ctx.db.delete(existingComment._id);
       }
     }
 
