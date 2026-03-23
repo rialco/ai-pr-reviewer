@@ -47,6 +47,12 @@ type CommentFilter =
   | "dismissed"
   | "other";
 
+type CommentFilterTab = {
+  value: CommentFilter;
+  label: string;
+  count: number;
+};
+
 const categoryVariant: Record<string, "must_fix" | "should_fix" | "nice_to_have" | "dismiss" | "already_addressed"> = {
   MUST_FIX: "must_fix",
   SHOULD_FIX: "should_fix",
@@ -675,16 +681,25 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
 
   const selectedMachine = repoMachineConfigs.find((config) => config.machineSlug === selectedMachineSlug) ?? null;
   const selectedMachineRecord = machines?.find((machine) => machine.slug === selectedMachineSlug) ?? null;
-  const preferredAnalyzerAgent: "claude" | "codex" | null = selectedMachineRecord?.capabilities.claude
-    ? "claude"
-    : selectedMachineRecord?.capabilities.codex
-      ? "codex"
-      : null;
-  const preferredFixerAgent: "claude" | "codex" | null = selectedMachineRecord?.capabilities.claude
-    ? "claude"
-    : selectedMachineRecord?.capabilities.codex
-      ? "codex"
-      : null;
+  const availableAnalyzerAgents = useMemo(
+    () =>
+      ([
+        selectedMachineRecord?.capabilities.claude ? "claude" : null,
+        selectedMachineRecord?.capabilities.codex ? "codex" : null,
+      ].filter(Boolean) as Array<"claude" | "codex">),
+    [selectedMachineRecord],
+  );
+  const availableFixerAgents = availableAnalyzerAgents;
+  const availableReviewAgents = useMemo(
+    () =>
+      ([
+        selectedMachineRecord?.capabilities.claude ? "claude" : null,
+        selectedMachineRecord?.capabilities.codex ? "codex" : null,
+      ].filter(Boolean) as Array<"claude" | "codex">),
+    [selectedMachineRecord],
+  );
+  const suggestedAnalyzerAgent = availableAnalyzerAgents[0] ?? null;
+  const suggestedFixerAgent = availableFixerAgents[0] ?? null;
   const pendingReviewCommentCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const comment of reviewComments ?? []) {
@@ -874,6 +889,62 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     () => (reviewComments ?? []).filter((comment) => !comment.supersededAt && (comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed")).length,
     [reviewComments],
   );
+  const githubFilterTabs = useMemo<CommentFilterTab[]>(
+    () => {
+      const tabs: CommentFilterTab[] = [
+        { value: "all", label: "All", count: githubComments.length },
+        { value: "pending", label: "Pending", count: githubPending.length },
+        { value: "must_fix", label: "Must Fix", count: githubMustFix.length },
+        { value: "should_fix", label: "Should Fix", count: githubShouldFix.length },
+        { value: "nice_to_have", label: "Nice to Have", count: githubNiceToHave.length },
+        { value: "fix_failed", label: "Fix Failed", count: githubFixFailed.length },
+        { value: "fixed", label: "Fixed", count: githubFixed.length },
+        { value: "already_addressed", label: "Addressed", count: githubAlreadyAddressed.length },
+        { value: "dismissed", label: "Dismissed", count: githubDismissedByAnalysis.length },
+        { value: "other", label: "Other", count: githubOtherComments.length },
+      ];
+      return tabs.filter((tab) => tab.value === "all" || tab.count > 0);
+    },
+    [
+      githubAlreadyAddressed.length,
+      githubComments.length,
+      githubDismissedByAnalysis.length,
+      githubFixed.length,
+      githubFixFailed.length,
+      githubMustFix.length,
+      githubNiceToHave.length,
+      githubOtherComments.length,
+      githubPending.length,
+      githubShouldFix.length,
+    ],
+  );
+  const reviewFilterTabs = useMemo<CommentFilterTab[]>(
+    () => {
+      const tabs: CommentFilterTab[] = [
+        { value: "all", label: "All", count: reviewComments?.length ?? 0 },
+        { value: "pending", label: "Pending", count: reviewPending.length },
+        { value: "must_fix", label: "Must Fix", count: reviewMustFix.length },
+        { value: "should_fix", label: "Should Fix", count: reviewShouldFix.length },
+        { value: "nice_to_have", label: "Nice to Have", count: reviewNiceToHave.length },
+        { value: "fix_failed", label: "Fix Failed", count: reviewFixFailed.length },
+        { value: "fixed", label: "Fixed", count: reviewFixed.length },
+        { value: "already_addressed", label: "Addressed", count: reviewAlreadyAddressed.length },
+        { value: "dismissed", label: "Dismissed", count: reviewDismissedByAnalysis.length },
+      ];
+      return tabs.filter((tab) => tab.value === "all" || tab.count > 0);
+    },
+    [
+      reviewAlreadyAddressed.length,
+      reviewComments?.length,
+      reviewDismissedByAnalysis.length,
+      reviewFixed.length,
+      reviewFixFailed.length,
+      reviewMustFix.length,
+      reviewNiceToHave.length,
+      reviewPending.length,
+      reviewShouldFix.length,
+    ],
+  );
   const visibleGithubComments = useMemo(() => {
     switch (githubFilter) {
       case "pending":
@@ -954,6 +1025,18 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     setReviewDetailsTab("summary");
   }, [selectedReviewerId]);
 
+  useEffect(() => {
+    if (!githubFilterTabs.some((tab) => tab.value === githubFilter)) {
+      setGithubFilter("all");
+    }
+  }, [githubFilter, githubFilterTabs]);
+
+  useEffect(() => {
+    if (!reviewFilterTabs.some((tab) => tab.value === reviewFilter)) {
+      setReviewFilter("all");
+    }
+  }, [reviewFilter, reviewFilterTabs]);
+
   if (!activeWorkspaceId || detail === undefined) {
     return (
       <div className="flex items-center justify-center py-12 text-muted-foreground">
@@ -1013,6 +1096,37 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       });
     } catch (error) {
       setReviewError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleRequestAllAvailableReviews = async () => {
+    for (const reviewerId of availableReviewAgents) {
+      await handleRequestReview(reviewerId);
+    }
+  };
+
+  const handleAnalyzePendingReviewComments = async (
+    analyzerAgent: "claude" | "codex",
+    reanalyze = false,
+  ) => {
+    const reviewerIds = Array.from(
+      new Set(
+        (reviewComments ?? [])
+          .filter((comment) => {
+            if (comment.supersededAt) {
+              return false;
+            }
+            if (reanalyze) {
+              return comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed";
+            }
+            return comment.status === "new" || comment.status === "analyzing";
+          })
+          .map((comment) => comment.reviewerId),
+      ),
+    ) as Array<"claude" | "codex">;
+
+    for (const reviewerId of reviewerIds) {
+      await handleAnalyzeReviewComments(reviewerId, analyzerAgent, reanalyze);
     }
   };
 
@@ -1164,7 +1278,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         icon: Sparkles,
         tone: "neutral",
       }
-    : pendingGithubCommentCount > 0 && preferredAnalyzerAgent
+    : pendingGithubCommentCount > 0 && suggestedAnalyzerAgent
       ? {
           key: "suggested-triage-github",
           kind: "suggested",
@@ -1173,9 +1287,9 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
           icon: Sparkles,
           buttonLabel: "Analyze",
           tone: "warning",
-          onClick: () => void handleAnalyzeGithubComments(preferredAnalyzerAgent),
+          onClick: () => void handleAnalyzeGithubComments(suggestedAnalyzerAgent),
         }
-      : fixableGithubCommentCount > 0 && preferredFixerAgent
+      : fixableGithubCommentCount > 0 && suggestedFixerAgent
         ? {
             key: "suggested-fix-github",
             kind: "suggested",
@@ -1184,7 +1298,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             icon: Wrench,
             buttonLabel: "Fix issues",
             tone: "info",
-            onClick: () => void handleFixGithubComments(preferredFixerAgent),
+            onClick: () => void handleFixGithubComments(suggestedFixerAgent),
           }
         : replyableGithubCommentCount > 0 && selectedMachineRecord?.capabilities.gh
           ? {
@@ -1197,7 +1311,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               tone: "success",
               onClick: () => void handleReplyToGithubComments(),
             }
-          : reviewPending.length > 0 && preferredAnalyzerAgent
+          : reviewPending.length > 0 && suggestedAnalyzerAgent
             ? {
                 key: "suggested-triage-local",
                 kind: "suggested",
@@ -1206,18 +1320,23 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 icon: Sparkles,
                 buttonLabel: "Analyze",
                 tone: "warning",
-                onClick: () => void handleAnalyzeReviewComments(preferredAnalyzerAgent, preferredAnalyzerAgent),
+                onClick: () => void handleAnalyzePendingReviewComments(suggestedAnalyzerAgent),
               }
-            : preferredAnalyzerAgent
+            : availableReviewAgents.length > 0
               ? {
                   key: "suggested-request-review",
                   kind: "suggested",
-                  title: `Request review with ${getAgentLabel(preferredAnalyzerAgent)}`,
-                  description: "The fastest next step is to run a fresh local review and gather actionable comments.",
+                  title: availableReviewAgents.length > 1 ? "Request reviews" : `Request review with ${getAgentLabel(availableReviewAgents[0])}`,
+                  description: availableReviewAgents.length > 1
+                    ? "Run both local reviewers to gather actionable comments before triage and fix steps."
+                    : "The fastest next step is to run a fresh local review and gather actionable comments.",
                   icon: Users,
                   buttonLabel: "Review",
                   tone: "neutral",
-                  onClick: () => void handleRequestReview(preferredAnalyzerAgent),
+                  onClick: () =>
+                    void (availableReviewAgents.length > 1
+                      ? handleRequestAllAvailableReviews()
+                      : handleRequestReview(availableReviewAgents[0])),
                 }
               : null;
 
@@ -1499,24 +1618,35 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             ) : null}
 
             <div className="mt-3 flex flex-wrap justify-end gap-2">
-              {pendingGithubCommentCount > 0 && preferredAnalyzerAgent ? (
-                <Button size="sm" onClick={() => void handleAnalyzeGithubComments(preferredAnalyzerAgent)}>
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Analyze
-                </Button>
-              ) : null}
-              {githubReanalyzableCount > 0 && preferredAnalyzerAgent ? (
-                <Button variant="outline" size="sm" onClick={() => void handleAnalyzeGithubComments(preferredAnalyzerAgent, true)}>
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  Re-analyze
-                </Button>
-              ) : null}
-              {fixableGithubCommentCount > 0 && preferredFixerAgent ? (
-                <Button size="sm" onClick={() => void handleFixGithubComments(preferredFixerAgent)}>
-                  <Wrench className="h-3.5 w-3.5" />
-                  Fix Issues ({fixableGithubCommentCount})
-                </Button>
-              ) : null}
+              {pendingGithubCommentCount > 0
+                ? availableAnalyzerAgents.map((agent) => (
+                    <Button key={`github-analyze-${agent}`} size="sm" onClick={() => void handleAnalyzeGithubComments(agent)}>
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Analyze with {getAgentLabel(agent)}
+                    </Button>
+                  ))
+                : null}
+              {githubReanalyzableCount > 0
+                ? availableAnalyzerAgents.map((agent) => (
+                    <Button
+                      key={`github-reanalyze-${agent}`}
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleAnalyzeGithubComments(agent, true)}
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Re-analyze with {getAgentLabel(agent)}
+                    </Button>
+                  ))
+                : null}
+              {fixableGithubCommentCount > 0
+                ? availableFixerAgents.map((agent) => (
+                    <Button key={`github-fix-${agent}`} size="sm" onClick={() => void handleFixGithubComments(agent)}>
+                      <Wrench className="h-3.5 w-3.5" />
+                      Fix with {getAgentLabel(agent)} ({fixableGithubCommentCount})
+                    </Button>
+                  ))
+                : null}
               {replyableGithubCommentCount > 0 && selectedMachineRecord?.capabilities.gh ? (
                 <Button variant="outline" size="sm" onClick={() => void handleReplyToGithubComments()}>
                   <MessageSquareReply className="h-3.5 w-3.5" />
@@ -1532,18 +1662,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             ) : (
               <div className="mt-3 space-y-3">
                 <div className="flex flex-wrap gap-2">
-                  {([
-                    ["all", "All", comments.length],
-                    ["pending", "Pending", githubPending.length],
-                    ["must_fix", "Must Fix", githubMustFix.length],
-                    ["should_fix", "Should Fix", githubShouldFix.length],
-                    ["nice_to_have", "Nice to Have", githubNiceToHave.length],
-                    ["fix_failed", "Fix Failed", githubFixFailed.length],
-                    ["fixed", "Fixed", githubFixed.length],
-                    ["already_addressed", "Addressed", githubAlreadyAddressed.length],
-                    ["dismissed", "Dismissed", githubDismissedByAnalysis.length],
-                    ["other", "Other", githubOtherComments.length],
-                  ] as const).map(([value, label, count]) => (
+                  {githubFilterTabs.map(({ value, label, count }) => (
                     <Button
                       key={value}
                       variant={githubFilter === value ? "secondary" : "outline"}
@@ -1669,25 +1788,45 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   if (pendingCount === 0 && reanalyzeCount === 0 && fixCount === 0 && publishCount === 0) return null;
 
                   return (
-                    <div key={`${reviewerId}-toolbar`} className="flex flex-wrap gap-2">
-                      {pendingCount > 0 && preferredAnalyzerAgent ? (
-                        <Button size="sm" onClick={() => void handleAnalyzeReviewComments(reviewerId, preferredAnalyzerAgent)}>
-                          <Sparkles className="h-3.5 w-3.5" />
-                          Analyze {getAgentLabel(reviewerId)} ({pendingCount})
-                        </Button>
-                      ) : null}
-                      {reanalyzeCount > 0 && preferredAnalyzerAgent ? (
-                        <Button variant="outline" size="sm" onClick={() => void handleAnalyzeReviewComments(reviewerId, preferredAnalyzerAgent, true)}>
-                          <RefreshCw className="h-3.5 w-3.5" />
-                          Re-analyze {getAgentLabel(reviewerId)}
-                        </Button>
-                      ) : null}
-                      {fixCount > 0 && preferredFixerAgent ? (
-                        <Button size="sm" onClick={() => void handleFixReviewComments(reviewerId, preferredFixerAgent)}>
-                          <Wrench className="h-3.5 w-3.5" />
-                          Fix {getAgentLabel(reviewerId)} ({fixCount})
-                        </Button>
-                      ) : null}
+                    <div key={`${reviewerId}-toolbar`} className="flex flex-wrap items-center gap-2 rounded-lg border border-white/8 bg-black/10 px-3 py-2">
+                      <Badge variant="outline">{getAgentLabel(reviewerId)}</Badge>
+                      {pendingCount > 0
+                        ? availableAnalyzerAgents.map((agent) => (
+                            <Button
+                              key={`${reviewerId}-analyze-${agent}`}
+                              size="sm"
+                              onClick={() => void handleAnalyzeReviewComments(reviewerId, agent)}
+                            >
+                              <Sparkles className="h-3.5 w-3.5" />
+                              Analyze with {getAgentLabel(agent)} ({pendingCount})
+                            </Button>
+                          ))
+                        : null}
+                      {reanalyzeCount > 0
+                        ? availableAnalyzerAgents.map((agent) => (
+                            <Button
+                              key={`${reviewerId}-reanalyze-${agent}`}
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void handleAnalyzeReviewComments(reviewerId, agent, true)}
+                            >
+                              <RefreshCw className="h-3.5 w-3.5" />
+                              Re-analyze with {getAgentLabel(agent)}
+                            </Button>
+                          ))
+                        : null}
+                      {fixCount > 0
+                        ? availableFixerAgents.map((agent) => (
+                            <Button
+                              key={`${reviewerId}-fix-${agent}`}
+                              size="sm"
+                              onClick={() => void handleFixReviewComments(reviewerId, agent)}
+                            >
+                              <Wrench className="h-3.5 w-3.5" />
+                              Fix with {getAgentLabel(agent)} ({fixCount})
+                            </Button>
+                          ))
+                        : null}
                       {publishCount > 0 && selectedMachineRecord.capabilities.gh ? (
                         <Button variant="outline" size="sm" onClick={() => void handlePublishReview(reviewerId)}>
                           <Upload className="h-3.5 w-3.5" />
@@ -1702,17 +1841,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             {reviewComments && reviewComments.length > 0 ? (
               <div className="mt-3 space-y-3">
                 <div className="flex flex-wrap gap-2">
-                  {([
-                    ["all", "All", reviewComments?.length ?? 0],
-                    ["pending", "Pending", reviewPending.length],
-                    ["must_fix", "Must Fix", reviewMustFix.length],
-                    ["should_fix", "Should Fix", reviewShouldFix.length],
-                    ["nice_to_have", "Nice to Have", reviewNiceToHave.length],
-                    ["fix_failed", "Fix Failed", reviewFixFailed.length],
-                    ["fixed", "Fixed", reviewFixed.length],
-                    ["already_addressed", "Addressed", reviewAlreadyAddressed.length],
-                    ["dismissed", "Dismissed", reviewDismissedByAnalysis.length],
-                  ] as const).map(([value, label, count]) => (
+                  {reviewFilterTabs.map(({ value, label, count }) => (
                     <Button
                       key={value}
                       variant={reviewFilter === value ? "secondary" : "outline"}
