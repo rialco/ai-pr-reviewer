@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQuery } from "convex/react";
 import { AddRepo } from "./components/AddRepo";
 import { CoordinatorDock } from "./components/CoordinatorDock";
 import { RepoList } from "./components/RepoList";
@@ -6,8 +7,39 @@ import { PRList } from "./components/PRList";
 import { CommentView } from "./components/CommentView";
 import { JobCenter } from "./components/JobCenter";
 import { useSummary } from "./hooks/useApi";
+import { hasCloudEnv } from "./lib/cloud";
 import { cn } from "./lib/utils";
 import { ChevronDown, ChevronRight, Github, MessageSquare } from "lucide-react";
+import { api } from "../convex/_generated/api";
+
+function LocalRepoCountBadge() {
+  const { data: summary } = useSummary();
+
+  return (
+    <span className="rounded-full border border-border/70 bg-muted/20 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+      {summary?.repos ?? 0} Repo{summary?.repos === 1 ? "" : "s"}
+    </span>
+  );
+}
+
+function CloudRepoCountBadge() {
+  const workspaces = useQuery(api.workspaces.listForCurrentUser);
+  const activeWorkspaceId = workspaces?.[0]?._id;
+  const repos = useQuery(
+    api.repos.listForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+  );
+
+  return (
+    <span className="rounded-full border border-border/70 bg-muted/20 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+      {repos?.length ?? 0} Repo{repos?.length === 1 ? "" : "s"}
+    </span>
+  );
+}
+
+function RepoCountBadge() {
+  return hasCloudEnv ? <CloudRepoCountBadge /> : <LocalRepoCountBadge />;
+}
 
 export function App() {
   const [selectedPR, setSelectedPR] = useState<{
@@ -16,7 +48,6 @@ export function App() {
   } | null>(null);
   const [footerPopover, setFooterPopover] = useState<"activity" | "coordinator" | null>(null);
   const [reposCollapsed, setReposCollapsed] = useState(false);
-
   const { data: summary } = useSummary();
 
   return (
@@ -49,9 +80,7 @@ export function App() {
                   Repositories
                 </p>
               </div>
-              <span className="rounded-full border border-border/70 bg-muted/20 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                {summary?.repos ?? 0} Repo{summary?.repos === 1 ? "" : "s"}
-              </span>
+              <RepoCountBadge />
             </button>
             <div
               id="repo-sidebar-section"
@@ -106,7 +135,7 @@ export function App() {
             <Github className="h-12 w-12 mb-4 opacity-20" />
             <p className="text-sm">Select a PR to view bot comments</p>
             <p className="text-xs mt-1">
-              Add a repo to get started — PRs sync automatically
+              {hasCloudEnv ? "Add a repository checkout to get started" : "Add a repo to get started — PRs sync automatically"}
             </p>
           </div>
         )}

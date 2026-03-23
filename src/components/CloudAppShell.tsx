@@ -6,10 +6,8 @@ import { App } from "@/App";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Popover } from "@/components/ui/popover";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { hasCloudEnv, missingCloudEnv } from "@/lib/cloud";
 import { api } from "../../convex/_generated/api";
-import type { Id } from "../../convex/_generated/dataModel";
 import { CodeBlock } from "@/components/CodeBlock";
 
 function CloudBootstrap() {
@@ -31,26 +29,11 @@ function CloudStatusCard() {
   const activeWorkspaceId = workspaces?.[0]?._id;
   const [copied, setCopied] = useState(false);
   const [open, setOpen] = useState(false);
-  const [checkoutOwner, setCheckoutOwner] = useState("");
-  const [checkoutRepo, setCheckoutRepo] = useState("");
-  const [checkoutPath, setCheckoutPath] = useState("");
-  const [selectedMachineSlug, setSelectedMachineSlug] = useState("");
   const createEnrollmentToken = useMutation(api.machines.createEnrollmentToken);
   const revokeEnrollmentToken = useMutation(api.machines.revokeEnrollmentToken);
   const enqueueMachineSelfCheck = useMutation(api.jobs.enqueueMachineSelfCheck);
-  const enqueueRepoSync = useMutation(api.jobs.enqueueRepoSync);
-  const upsertRepo = useMutation(api.repos.upsert);
-  const upsertMachineConfig = useMutation(api.repos.upsertMachineConfig);
   const machines = useQuery(
     api.machines.listForWorkspace,
-    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
-  );
-  const repos = useQuery(
-    api.repos.listForWorkspace,
-    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
-  );
-  const repoMachineConfigs = useQuery(
-    api.repos.listMachineConfigsForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
   );
   const jobs = useQuery(
@@ -66,12 +49,6 @@ function CloudStatusCard() {
     activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
   );
 
-  useEffect(() => {
-    if (!selectedMachineSlug && machines?.[0]?.slug) {
-      setSelectedMachineSlug(machines[0].slug);
-    }
-  }, [machines, selectedMachineSlug]);
-
   if (!viewer || !viewer.user) {
     return null;
   }
@@ -86,7 +63,7 @@ function CloudStatusCard() {
       runsByJobId.set(run.jobId, run);
     }
     return runsByJobId;
-  }, new Map<Id<"jobs">, JobRunRecord>());
+  }, new Map<string, JobRunRecord>());
   const workerSnippet = latestToken
     ? [
         `WORKER_ENROLLMENT_TOKEN=${latestToken.token}`,
@@ -114,49 +91,6 @@ function CloudStatusCard() {
     if (!activeWorkspaceId) return;
     await enqueueMachineSelfCheck({
       workspaceId: activeWorkspaceId,
-      machineSlug,
-    });
-  };
-
-  const handleRegisterCheckout = async () => {
-    if (!activeWorkspaceId || !selectedMachineSlug) return;
-    const owner = checkoutOwner.trim();
-    const repo = checkoutRepo.trim();
-    const localPath = checkoutPath.trim();
-
-    if (!owner || !repo || !localPath) {
-      return;
-    }
-
-    const cloudRepo = await upsertRepo({
-      workspaceId: activeWorkspaceId,
-      owner,
-      repo,
-      botUsers: [],
-    });
-
-    if (!cloudRepo?._id) {
-      throw new Error("Failed to create or load the repo in Convex.");
-    }
-
-    await upsertMachineConfig({
-      workspaceId: activeWorkspaceId,
-      repoId: cloudRepo._id,
-      machineSlug: selectedMachineSlug,
-      localPath,
-      skipTypecheck: false,
-    });
-
-    setCheckoutOwner("");
-    setCheckoutRepo("");
-    setCheckoutPath("");
-  };
-
-  const handleEnqueueRepoSync = async (repoId: Id<"repos">, machineSlug: string) => {
-    if (!activeWorkspaceId) return;
-    await enqueueRepoSync({
-      workspaceId: activeWorkspaceId,
-      repoId,
       machineSlug,
     });
   };
@@ -215,105 +149,6 @@ function CloudStatusCard() {
               </div>
               <p className="text-lg font-semibold text-foreground">{machines?.length ?? 0}</p>
             </div>
-          </div>
-
-          <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">
-                Register Checkout
-              </p>
-              <p className="mt-1 text-xs leading-5">
-                Attach a repo checkout path to a linked machine so the cloud queue can target real
-                local work.
-              </p>
-            </div>
-
-            <div className="grid gap-2">
-              <input
-                value={checkoutOwner}
-                onChange={(event) => setCheckoutOwner(event.target.value)}
-                placeholder="GitHub owner"
-                className="h-9 rounded-md border border-border bg-transparent px-3 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
-              />
-              <input
-                value={checkoutRepo}
-                onChange={(event) => setCheckoutRepo(event.target.value)}
-                placeholder="Repository name"
-                className="h-9 rounded-md border border-border bg-transparent px-3 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
-              />
-              <input
-                value={checkoutPath}
-                onChange={(event) => setCheckoutPath(event.target.value)}
-                placeholder="/absolute/path/to/local/checkout"
-                className="h-9 rounded-md border border-border bg-transparent px-3 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
-              />
-              <Select value={selectedMachineSlug} onValueChange={setSelectedMachineSlug}>
-                <SelectTrigger className="h-9 rounded-md border border-border bg-transparent px-3 text-sm text-foreground shadow-none focus:ring-2 focus:ring-ring">
-                  <SelectValue placeholder="Select machine" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(machines ?? []).map((machine) => (
-                    <SelectItem key={machine._id} value={machine.slug}>
-                      {machine.name} ({machine.slug})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="flex justify-end">
-              <Button
-                size="sm"
-                onClick={() => void handleRegisterCheckout()}
-                disabled={!activeWorkspaceId || !selectedMachineSlug || !checkoutOwner || !checkoutRepo || !checkoutPath}
-              >
-                Save Checkout
-              </Button>
-            </div>
-          </div>
-
-          <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">
-                Repo Checkouts
-              </p>
-              <p className="mt-1 text-xs leading-5">
-                Registered cloud repos: {repos?.length ?? 0}. Machine-bound checkout configs can
-                run sync jobs without the local SQLite backend.
-              </p>
-            </div>
-
-            {repoMachineConfigs && repoMachineConfigs.length > 0 ? (
-              <div className="space-y-2">
-                {repoMachineConfigs.map((config) => (
-                  <div key={config._id} className="rounded-md border border-border/70 bg-card/80 px-3 py-2">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-foreground">{config.repoLabel}</p>
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          {config.machineName} · {config.machineSlug} · {config.machineStatus}
-                        </p>
-                        <p className="mt-1 truncate text-[11px] text-muted-foreground">
-                          {config.localPath}
-                        </p>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={config.machineStatus === "busy"}
-                        onClick={() => void handleEnqueueRepoSync(config.repoId, config.machineSlug)}
-                      >
-                        Sync
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs leading-5 text-muted-foreground">
-                No machine checkout configs yet. Save one above, then queue a cloud repo sync.
-              </p>
-            )}
           </div>
 
           <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
@@ -444,43 +279,46 @@ function CloudStatusCard() {
 
             {recentMachineJobs.length > 0 ? (
               <div className="space-y-2">
-                {recentMachineJobs.map((job) => (
-                  <div key={job._id} className="rounded-md border border-border/70 bg-card/80 px-3 py-2">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-foreground">{job.title}</p>
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          {job.targetMachineSlug ?? "any machine"} · {job.status} ·{" "}
-                          {new Date(job.updatedAt).toLocaleString()}
-                        </p>
-                        {job.errorMessage ? (
-                          <p className="mt-1 text-[11px] text-destructive">{job.errorMessage}</p>
-                        ) : null}
-                        {recentMachineRunsByJobId.get(job._id) ? (
-                          <div className="mt-2 space-y-1 rounded-md border border-border/60 bg-background/40 px-2 py-1.5">
-                            <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                              Latest Run
-                            </p>
-                            <p className="text-[11px] text-muted-foreground">
-                              {recentMachineRunsByJobId.get(job._id)?.status} ·{" "}
-                              {recentMachineRunsByJobId.get(job._id)?.machineSlug ?? "unassigned"}
-                            </p>
-                            {(recentMachineRunsByJobId.get(job._id)?.steps ?? []).slice(-2).map((step, index) => (
-                              <p key={`${job._id}-${index}`} className="text-[11px] text-muted-foreground">
-                                {step.step}: {step.detail ?? step.status}
+                {recentMachineJobs.map((job) => {
+                  const latestRun = recentMachineRunsByJobId.get(job._id);
+
+                  return (
+                    <div key={job._id} className="rounded-md border border-border/70 bg-card/80 px-3 py-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-foreground">{job.title}</p>
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            {job.targetMachineSlug ?? "any machine"} · {job.status} ·{" "}
+                            {new Date(job.updatedAt).toLocaleString()}
+                          </p>
+                          {job.errorMessage ? (
+                            <p className="mt-1 text-[11px] text-destructive">{job.errorMessage}</p>
+                          ) : null}
+                          {latestRun ? (
+                            <div className="mt-2 space-y-1 rounded-md border border-border/60 bg-background/40 px-2 py-1.5">
+                              <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                                Latest Run
                               </p>
-                            ))}
-                            {(recentMachineRunsByJobId.get(job._id)?.output ?? []).slice(-3).map((line, index) => (
-                              <p key={`${job._id}-line-${index}`} className="font-mono text-[10px] text-foreground/80">
-                                {line}
+                              <p className="text-[11px] text-muted-foreground">
+                                {latestRun.status} · {latestRun.machineSlug ?? "unassigned"}
                               </p>
-                            ))}
-                          </div>
-                        ) : null}
+                              {latestRun.steps.slice(-2).map((step, index) => (
+                                <p key={`${job._id}-${index}`} className="text-[11px] text-muted-foreground">
+                                  {step.step}: {step.detail ?? step.status}
+                                </p>
+                              ))}
+                              {latestRun.output.slice(-3).map((line, index) => (
+                                <p key={`${job._id}-line-${index}`} className="font-mono text-[10px] text-foreground/80">
+                                  {line}
+                                </p>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <p className="text-xs leading-5 text-muted-foreground">
