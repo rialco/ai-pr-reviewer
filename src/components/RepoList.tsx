@@ -174,9 +174,17 @@ export function RepoList() {
                     variant="ghost"
                     size="icon"
                     className="h-6.5 w-6.5 rounded-md"
+                    aria-expanded={expandedRepoId === repo._id}
                     title="Show repository details"
+                    onClick={() =>
+                      setExpandedRepoId((current) => (current === repo._id ? null : repo._id))
+                    }
                   >
-                    <ChevronDown className="h-3 w-3 text-muted-foreground" />
+                    <ChevronDown
+                      className={`h-3 w-3 text-muted-foreground transition-transform duration-200 ${
+                        expandedRepoId === repo._id ? "rotate-180" : ""
+                      }`}
+                    />
                   </Button>
                 </Popover>
               </div>
