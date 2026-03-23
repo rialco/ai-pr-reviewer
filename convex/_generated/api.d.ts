@@ -9,6 +9,8 @@
  */
 
 import type * as bootstrap from "../bootstrap.js";
+import type * as coordinator from "../coordinator.js";
+import type * as crons from "../crons.js";
 import type * as githubComments from "../githubComments.js";
 import type * as jobs from "../jobs.js";
 import type * as lib_auth from "../lib/auth.js";
@@ -28,6 +30,8 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   bootstrap: typeof bootstrap;
+  coordinator: typeof coordinator;
+  crons: typeof crons;
   githubComments: typeof githubComments;
   jobs: typeof jobs;
   "lib/auth": typeof lib_auth;

@@ -49,6 +49,44 @@ export default defineSchema({
     updatedAt: v.string(),
   }).index("by_workspaceId", ["workspaceId"]),
 
+  coordinatorRuns: defineTable({
+    workspaceId: v.id("workspaces"),
+    initiatedByUserId: v.optional(v.id("users")),
+    trigger: v.union(v.literal("manual"), v.literal("scheduled")),
+    plannerAgent: v.union(v.literal("claude"), v.literal("codex")),
+    status: v.union(v.literal("running"), v.literal("done"), v.literal("error")),
+    scannedPrCount: v.number(),
+    queuedJobCount: v.number(),
+    skippedPrCount: v.number(),
+    summary: v.string(),
+    actions: v.array(
+      v.object({
+        kind: v.union(
+          v.literal("refresh_pr"),
+          v.literal("analyze_comments"),
+          v.literal("fix_comments"),
+          v.literal("request_review"),
+          v.literal("publish_review"),
+          v.literal("reply_comment"),
+        ),
+        repoLabel: v.string(),
+        prNumber: v.number(),
+        machineSlug: v.string(),
+        reason: v.string(),
+      }),
+    ),
+    skippedReasons: v.array(
+      v.object({
+        key: v.string(),
+        count: v.number(),
+      }),
+    ),
+    errorMessage: v.optional(v.string()),
+    startedAt: v.string(),
+    finishedAt: v.optional(v.string()),
+    updatedAt: v.string(),
+  }).index("by_workspaceId_startedAt", ["workspaceId", "startedAt"]),
+
   repos: defineTable({
     workspaceId: v.id("workspaces"),
     owner: v.string(),

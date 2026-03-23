@@ -1,8 +1,10 @@
 import { useMutation, useQuery } from "convex/react";
-import { ChevronDown, Settings2, Sparkles } from "lucide-react";
+import { ChevronDown, Loader2, Play, Settings2, Sparkles } from "lucide-react";
+import { useState } from "react";
 import { api } from "../../convex/_generated/api";
 import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
 import { AgentLogo, getAgentLabel } from "./ui/agent-logo";
+import { Button } from "./ui/button";
 import { Popover } from "./ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Switch } from "./ui/switch";
@@ -10,6 +12,13 @@ import { Switch } from "./ui/switch";
 const COORDINATOR_CHECK_INTERVAL_SECONDS = 30;
 type ReviewerId = "greptile" | "claude" | "codex";
 const REVIEWER_ORDER: ReviewerId[] = ["claude", "codex", "greptile"];
+
+function formatTimestamp(value: string | null | undefined) {
+  if (!value) {
+    return "Never";
+  }
+  return new Date(value).toLocaleString();
+}
 
 function PreferencePill({
   agent,
@@ -62,13 +71,21 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
     api.settings.listAvailableReviewers,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
   );
+  const coordinatorStatus = useQuery(
+    api.coordinator.getStatusForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+  );
   const updateSettings = useMutation(api.settings.updateForWorkspace);
+  const runCoordinatorNow = useMutation(api.coordinator.runNowForWorkspace);
   const coordinatorAgent = settings?.coordinatorAgent ?? "claude";
   const coordinatorEnabled = settings?.coordinatorEnabled ?? false;
   const defaultAnalyzerAgent = settings?.defaultAnalyzerAgent ?? "claude";
   const defaultFixerAgent = settings?.defaultFixerAgent ?? "claude";
   const defaultReviewerIds = settings?.defaultReviewerIds ?? ["claude", "codex"];
   const reviewerAvailability = new Map((reviewers ?? []).map((reviewer) => [reviewer.id, reviewer.available]));
+  const latestRun = coordinatorStatus?.latestRun ?? null;
+  const [runNowError, setRunNowError] = useState<string | null>(null);
+  const [isRunningNow, setIsRunningNow] = useState(false);
 
   const toggleDefaultReviewer = (reviewerId: ReviewerId) => {
     if (!activeWorkspaceId) {
@@ -89,6 +106,24 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
     });
   };
 
+  const handleRunNow = async () => {
+    if (!activeWorkspaceId || isRunningNow) {
+      return;
+    }
+
+    try {
+      setIsRunningNow(true);
+      setRunNowError(null);
+      await runCoordinatorNow({
+        workspaceId: activeWorkspaceId,
+      });
+    } catch (error) {
+      setRunNowError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsRunningNow(false);
+    }
+  };
+
   return (
     <Popover
       open={open}
@@ -107,7 +142,7 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
                 Runs the next clear workflow step automatically.
               </p>
               <p className="mt-1 text-[10px] text-muted-foreground">
-                Checks every {COORDINATOR_CHECK_INTERVAL_SECONDS}s
+                Cron runs every {coordinatorStatus?.intervalSeconds ?? COORDINATOR_CHECK_INTERVAL_SECONDS}s when enabled
               </p>
             </div>
             <Switch
@@ -123,6 +158,52 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
                 });
               }}
             />
+          </div>
+
+          <div className="rounded-lg border border-border/60 bg-card/70 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Runtime
+                </p>
+                <p className="mt-1 text-xs text-foreground/90">
+                  {latestRun?.summary ?? "No coordinator pass has run yet."}
+                </p>
+                <p className="mt-1 text-[10px] text-muted-foreground">
+                  Last run: {formatTimestamp(latestRun?.finishedAt ?? latestRun?.startedAt)}
+                </p>
+                <p className="mt-0.5 text-[10px] text-muted-foreground">
+                  Active jobs: {coordinatorStatus?.activeJobCount ?? 0}
+                  {latestRun
+                    ? ` • ${latestRun.trigger === "manual" ? "manual" : "scheduled"} • ${latestRun.status}`
+                    : ""}
+                </p>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => void handleRunNow()} disabled={!activeWorkspaceId || isRunningNow}>
+                {isRunningNow ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
+                Run now
+              </Button>
+            </div>
+            {runNowError ? <p className="mt-2 text-[10px] text-destructive">{runNowError}</p> : null}
+            {latestRun?.actions?.length ? (
+              <div className="mt-3 space-y-1.5">
+                <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                  Latest Actions
+                </p>
+                <div className="space-y-1.5">
+                  {latestRun.actions.slice(0, 4).map((action) => (
+                    <div key={`${action.kind}-${action.repoLabel}-${action.prNumber}-${action.machineSlug}`} className="rounded-md border border-border/50 bg-background/50 px-2.5 py-2">
+                      <p className="text-[11px] font-medium text-foreground/95">
+                        {action.repoLabel} #{action.prNumber} • {action.kind}
+                      </p>
+                      <p className="mt-0.5 text-[10px] text-muted-foreground">
+                        {action.machineSlug} • {action.reason}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div className="space-y-1.5">
@@ -261,7 +342,9 @@ export function CoordinatorDock({ open, onOpenChange }: CoordinatorDockProps) {
             {coordinatorEnabled ? getAgentLabel(coordinatorAgent) : "Standby"}
           </p>
           <p className="truncate text-[10px] text-muted-foreground">
-            {coordinatorEnabled ? `Checks every ${COORDINATOR_CHECK_INTERVAL_SECONDS}s` : "Automation off"}
+            {coordinatorEnabled
+              ? `Runs every ${coordinatorStatus?.intervalSeconds ?? COORDINATOR_CHECK_INTERVAL_SECONDS}s`
+              : "Automation off"}
           </p>
         </div>
 
