@@ -187,6 +187,86 @@ async function upsertPrSnapshot(
   return prId;
 }
 
+async function deletePrCascade(
+  ctx: MutationCtx,
+  params: {
+    workspaceId: Id<"workspaces">;
+    pr: Doc<"prs">;
+  },
+) {
+  const { workspaceId, pr } = params;
+  const [githubComments, reviewComments, reviews, timelineEvents, jobs] = await Promise.all([
+    ctx.db
+      .query("githubComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect(),
+    ctx.db
+      .query("reviewComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect(),
+    ctx.db
+      .query("reviews")
+      .withIndex("by_prId_reviewer", (q) => q.eq("prId", pr._id))
+      .collect(),
+    ctx.db
+      .query("timelineEvents")
+      .withIndex("by_prId_createdAt", (q) => q.eq("prId", pr._id))
+      .collect(),
+    ctx.db
+      .query("jobs")
+      .withIndex("by_workspaceId_createdAt", (q) => q.eq("workspaceId", workspaceId))
+      .collect(),
+  ]);
+
+  const prJobs = jobs.filter((job) => job.prId === pr._id);
+  const activeJob = prJobs.find(
+    (job) => job.status === "queued" || job.status === "claimed" || job.status === "running",
+  );
+
+  if (activeJob) {
+    throw new Error(`Cannot reset PR while job "${activeJob.title}" is still ${activeJob.status}.`);
+  }
+
+  for (const githubComment of githubComments) {
+    await ctx.db.delete(githubComment._id);
+  }
+
+  for (const reviewComment of reviewComments) {
+    await ctx.db.delete(reviewComment._id);
+  }
+
+  for (const review of reviews) {
+    await ctx.db.delete(review._id);
+  }
+
+  for (const event of timelineEvents) {
+    await ctx.db.delete(event._id);
+  }
+
+  for (const job of prJobs) {
+    const jobRuns = await ctx.db
+      .query("jobRuns")
+      .withIndex("by_jobId", (q) => q.eq("jobId", job._id))
+      .collect();
+
+    for (const jobRun of jobRuns) {
+      await ctx.db.delete(jobRun._id);
+    }
+
+    await ctx.db.delete(job._id);
+  }
+
+  await ctx.db.delete(pr._id);
+
+  return {
+    githubCommentCount: githubComments.length,
+    reviewCommentCount: reviewComments.length,
+    reviewCount: reviews.length,
+    timelineEventCount: timelineEvents.length,
+    jobCount: prJobs.length,
+  };
+}
+
 export const listForWorkspace = query({
   args: {
     workspaceId: v.id("workspaces"),
@@ -325,6 +405,49 @@ export const getTimelineEventForWorkspace = query({
     }
 
     return event;
+  },
+});
+
+export const resetForWorkspace = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    repoLabel: v.string(),
+    prNumber: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await requireWorkspaceAccess(ctx, args.workspaceId);
+
+    const repo = await ctx.db
+      .query("repos")
+      .withIndex("by_workspaceId_label", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("label", args.repoLabel),
+      )
+      .unique();
+
+    if (!repo || repo.archivedAt) {
+      throw new Error("Repo not found.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found.");
+    }
+
+    const deleted = await deletePrCascade(ctx, {
+      workspaceId: args.workspaceId,
+      pr,
+    });
+
+    return {
+      ok: true,
+      repoLabel: repo.label,
+      prNumber: args.prNumber,
+      ...deleted,
+    };
   },
 });
 
@@ -470,7 +593,10 @@ export const upsertRepoSyncSnapshot = mutation({
           continue;
         }
 
-        await ctx.db.delete(existing._id);
+        await deletePrCascade(ctx, {
+          workspaceId: machine.workspaceId,
+          pr: existing,
+        });
       }
     }
 

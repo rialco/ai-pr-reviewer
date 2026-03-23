@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "convex/react";
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronRight, Clock3, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, History, Loader2, MessageSquareReply, Minus, Plus, RefreshCw, Sparkles, Upload, Users, Wrench, X } from "lucide-react";
+import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronRight, Clock3, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, History, Loader2, MessageSquareReply, Minus, Plus, RefreshCw, Sparkles, Trash2, Upload, Users, Wrench, X } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
 import { cn } from "@/lib/utils";
@@ -12,6 +12,7 @@ import { MarkdownBody } from "./MarkdownBody";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { SectionHeader } from "./ui/section-header";
 import { AgentLogo, getAgentLabel } from "./ui/agent-logo";
+import { ConfirmDialog } from "./ui/confirm-dialog";
 
 interface CloudCommentViewProps {
   repo: string;
@@ -227,6 +228,26 @@ function getTimelineToneClasses(tone: "pending" | "success" | "error" | "info" |
 function joinMeta(items: string[] | undefined): string | null {
   if (!items || items.length === 0) return null;
   return items.join(", ");
+}
+
+function AgentInlineLabel({
+  agent,
+  prefix,
+  className,
+}: {
+  agent: "claude" | "codex";
+  prefix?: string;
+  className?: string;
+}) {
+  return (
+    <span className={cn("inline-flex items-center gap-1.5", className)}>
+      <AgentLogo agent={agent} className="h-3.5 w-3.5 shrink-0" />
+      <span>
+        {prefix ? `${prefix} ` : ""}
+        {getAgentLabel(agent)}
+      </span>
+    </span>
+  );
 }
 
 function AnalysisDetailsPanel({
@@ -644,6 +665,7 @@ function formatTimelineDetail(event: { eventType: string; detail: Record<string,
 
 export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const { activeWorkspaceId } = useActiveWorkspace();
+  const resetPrData = useMutation(api.prs.resetForWorkspace);
   const enqueuePrRefresh = useMutation(api.jobs.enqueuePrRefresh);
   const enqueueGithubCommentAnalysis = useMutation(api.jobs.enqueueGithubCommentAnalysis);
   const enqueueGithubCommentFix = useMutation(api.jobs.enqueueGithubCommentFix);
@@ -684,6 +706,9 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [fixError, setFixError] = useState<string | null>(null);
   const [replyError, setReplyError] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
   const [timelineTab, setTimelineTab] = useState<"history" | "parameters" | "prompt">("history");
   const [selectedReviewerId, setSelectedReviewerId] = useState<"claude" | "codex" | null>(null);
@@ -1115,6 +1140,31 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     }
   };
 
+  const handleResetPrData = async () => {
+    if (!activeWorkspaceId || isResetting) {
+      return;
+    }
+
+    try {
+      setResetError(null);
+      setIsResetting(true);
+      await resetPrData({
+        workspaceId: activeWorkspaceId,
+        repoLabel: repo,
+        prNumber,
+      });
+      setResetDialogOpen(false);
+      setSelectedTimelineEventId(null);
+      setSelectedReviewerId(null);
+      setGithubFilter("all");
+      setReviewFilter("all");
+    } catch (error) {
+      setResetError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
   const handleRequestReview = async (reviewerId: "claude" | "codex") => {
     if (!activeWorkspaceId || !selectedMachineSlug) {
       return;
@@ -1433,16 +1483,20 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                     </Button>
                     {selectedMachineRecord?.capabilities.claude ? (
                       <Button variant="outline" size="sm" disabled={!selectedMachineSlug} onClick={() => void handleRequestReview("claude")}>
-                        Review with Claude
+                        <AgentInlineLabel agent="claude" prefix="Review with" />
                       </Button>
                     ) : null}
                     {selectedMachineRecord?.capabilities.codex ? (
                       <Button variant="outline" size="sm" disabled={!selectedMachineSlug} onClick={() => void handleRequestReview("codex")}>
-                        Review with Codex
+                        <AgentInlineLabel agent="codex" prefix="Review with" />
                       </Button>
                     ) : null}
                   </>
                 ) : null}
+                <Button variant="destructive" size="sm" onClick={() => setResetDialogOpen(true)}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Reset PR data
+                </Button>
                 <a href={pr.url} target="_blank" rel="noopener noreferrer" className="shrink-0">
                   <Button variant="outline" size="sm">
                     <ExternalLink className="h-3.5 w-3.5" />
@@ -1452,6 +1506,11 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
             </div>
           </div>
+          {resetError ? (
+            <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              {resetError}
+            </div>
+          ) : null}
         </section>
       </div>
 
@@ -1657,7 +1716,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 ? availableAnalyzerAgents.map((agent) => (
                     <Button key={`github-analyze-${agent}`} size="sm" onClick={() => void handleAnalyzeGithubComments(agent)}>
                       <Sparkles className="h-3.5 w-3.5" />
-                      Analyze with {getAgentLabel(agent)}
+                      <AgentInlineLabel agent={agent} prefix="Analyze with" />
                     </Button>
                   ))
                 : null}
@@ -1670,7 +1729,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                       onClick={() => void handleAnalyzeGithubComments(agent, true)}
                     >
                       <RefreshCw className="h-3.5 w-3.5" />
-                      Re-analyze with {getAgentLabel(agent)}
+                      <AgentInlineLabel agent={agent} prefix="Re-analyze with" />
                     </Button>
                   ))
                 : null}
@@ -1678,7 +1737,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 ? availableFixerAgents.map((agent) => (
                     <Button key={`github-fix-${agent}`} size="sm" onClick={() => void handleFixGithubComments(agent)}>
                       <Wrench className="h-3.5 w-3.5" />
-                      Fix with {getAgentLabel(agent)} ({fixableGithubCommentCount})
+                      <span className="inline-flex items-center gap-1.5">
+                        <AgentInlineLabel agent={agent} prefix="Fix with" />
+                        <span>({fixableGithubCommentCount})</span>
+                      </span>
                     </Button>
                   ))
                 : null}
@@ -1824,7 +1886,9 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
 
                   return (
                     <div key={`${reviewerId}-toolbar`} className="flex flex-wrap items-center gap-2 rounded-lg border border-white/8 bg-black/10 px-3 py-2">
-                      <Badge variant="outline">{getAgentLabel(reviewerId)}</Badge>
+                      <Badge variant="outline" className="gap-1.5">
+                        <AgentInlineLabel agent={reviewerId} prefix="Comments from" />
+                      </Badge>
                       {pendingCount > 0
                         ? availableAnalyzerAgents.map((agent) => (
                             <Button
@@ -1833,7 +1897,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                               onClick={() => void handleAnalyzeReviewComments(reviewerId, agent)}
                             >
                               <Sparkles className="h-3.5 w-3.5" />
-                              Analyze with {getAgentLabel(agent)} ({pendingCount})
+                              <span className="inline-flex items-center gap-1.5">
+                                <AgentInlineLabel agent={agent} prefix="Analyze with" />
+                                <span>({pendingCount})</span>
+                              </span>
                             </Button>
                           ))
                         : null}
@@ -1846,7 +1913,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                               onClick={() => void handleAnalyzeReviewComments(reviewerId, agent, true)}
                             >
                               <RefreshCw className="h-3.5 w-3.5" />
-                              Re-analyze with {getAgentLabel(agent)}
+                              <AgentInlineLabel agent={agent} prefix="Re-analyze with" />
                             </Button>
                           ))
                         : null}
@@ -1858,14 +1925,17 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                               onClick={() => void handleFixReviewComments(reviewerId, agent)}
                             >
                               <Wrench className="h-3.5 w-3.5" />
-                              Fix with {getAgentLabel(agent)} ({fixCount})
+                              <span className="inline-flex items-center gap-1.5">
+                                <AgentInlineLabel agent={agent} prefix="Fix with" />
+                                <span>({fixCount})</span>
+                              </span>
                             </Button>
                           ))
                         : null}
                       {publishCount > 0 && selectedMachineRecord.capabilities.gh ? (
                         <Button variant="outline" size="sm" onClick={() => void handlePublishReview(reviewerId)}>
                           <Upload className="h-3.5 w-3.5" />
-                          Publish {getAgentLabel(reviewerId)}
+                          <AgentInlineLabel agent={reviewerId} prefix="Publish" />
                         </Button>
                       ) : null}
                     </div>
@@ -1892,7 +1962,9 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 {visibleReviewComments.map((comment) => (
                   <Card key={comment._id} className="border-white/8 bg-black/10 px-3 py-3">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline">{getAgentLabel(comment.reviewerId)}</Badge>
+                      <Badge variant="outline" className="gap-1.5">
+                        <AgentInlineLabel agent={comment.reviewerId as "claude" | "codex"} prefix="Reviewed by" />
+                      </Badge>
                       <Badge variant="outline">{comment.path}:{comment.line}</Badge>
                       <Badge variant="outline">{comment.status}</Badge>
                       {comment.analysisCategory ? (
@@ -2112,7 +2184,17 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       <Dialog
         open={selectedReviewerSummary !== null}
         onClose={() => setSelectedReviewerId(null)}
-        title={selectedReviewerSummary ? getAgentLabel(selectedReviewerSummary.reviewerId) : "Review details"}
+        title={
+          selectedReviewerSummary ? (
+            <AgentInlineLabel
+              agent={selectedReviewerSummary.reviewerId as "claude" | "codex"}
+              prefix="Review details"
+              className="text-sm"
+            />
+          ) : (
+            "Review details"
+          )
+        }
         description={
           selectedReviewerSummary?.latestReview?.confidenceScore != null
             ? `Confidence ${selectedReviewerSummary.latestReview.confidenceScore}/5`
@@ -2172,6 +2254,21 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
           </div>
         ) : null}
       </Dialog>
+
+      <ConfirmDialog
+        open={resetDialogOpen}
+        title="Reset PR data?"
+        description="This will permanently delete the Convex snapshot for this PR, including GitHub comments, reviews, review comments, timeline history, jobs, and job runs. Use Sync or Refresh PR afterwards to repopulate it."
+        confirmLabel={isResetting ? "Resetting..." : "Reset PR data"}
+        cancelLabel="Cancel"
+        variant="destructive"
+        onCancel={() => {
+          if (!isResetting) {
+            setResetDialogOpen(false);
+          }
+        }}
+        onConfirm={() => void handleResetPrData()}
+      />
     </div>
   );
 }
