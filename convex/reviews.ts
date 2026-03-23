@@ -102,6 +102,46 @@ export const listCommentsForPr = query({
   },
 });
 
+export const listCommentsForMachine = query({
+  args: {
+    machineToken: v.string(),
+    repoId: v.id("repos"),
+    prNumber: v.number(),
+    reviewerId: v.union(v.literal("claude"), v.literal("codex")),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const repo = await ctx.db.get(args.repoId);
+
+    if (!repo || repo.workspaceId !== machine.workspaceId || repo.archivedAt) {
+      throw new Error("Repo not found for this machine workspace.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const comments = await ctx.db
+      .query("reviewComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+
+    return comments
+      .filter(
+        (comment) =>
+          comment.reviewerId === args.reviewerId &&
+          !comment.supersededAt &&
+          (comment.status === "new" || comment.status === "analyzing"),
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  },
+});
+
 export const upsertReviewResult = mutation({
   args: {
     machineToken: v.string(),
@@ -186,6 +226,7 @@ export const upsertReviewResult = mutation({
         status: "new",
         analysisCategory: "UNTRIAGED",
         analysisReasoning: undefined,
+        analysisDetails: undefined,
         suggestion: comment.suggestion,
         publishedAt: undefined,
         supersededAt: undefined,
@@ -212,5 +253,109 @@ export const upsertReviewResult = mutation({
     });
 
     return await ctx.db.get(reviewId);
+  },
+});
+
+export const applyReviewCommentAnalysisResults = mutation({
+  args: {
+    machineToken: v.string(),
+    repoId: v.id("repos"),
+    prNumber: v.number(),
+    reviewerId: v.union(v.literal("claude"), v.literal("codex")),
+    analyzerAgent: v.union(v.literal("claude"), v.literal("codex")),
+    results: v.array(
+      v.object({
+        commentId: v.id("reviewComments"),
+        category: v.union(
+          v.literal("MUST_FIX"),
+          v.literal("SHOULD_FIX"),
+          v.literal("NICE_TO_HAVE"),
+          v.literal("DISMISS"),
+          v.literal("ALREADY_ADDRESSED"),
+        ),
+        reasoning: v.string(),
+        verdict: v.optional(
+          v.union(v.literal("ACTIONABLE"), v.literal("DISMISS"), v.literal("ALREADY_ADDRESSED")),
+        ),
+        severity: v.optional(
+          v.union(v.literal("MUST_FIX"), v.literal("SHOULD_FIX"), v.literal("NICE_TO_HAVE"), v.null()),
+        ),
+        confidence: v.optional(v.union(v.number(), v.null())),
+        accessMode: v.optional(v.union(v.literal("FULL_CODEBASE"), v.literal("DIFF_ONLY"))),
+        evidence: v.optional(
+          v.union(
+            v.object({
+              filesRead: v.array(v.string()),
+              symbolsChecked: v.array(v.string()),
+              callersChecked: v.array(v.string()),
+              testsChecked: v.array(v.string()),
+              riskSummary: v.optional(v.string()),
+              validationNotes: v.optional(v.string()),
+            }),
+            v.null(),
+          ),
+        ),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const repo = await ctx.db.get(args.repoId);
+
+    if (!repo || repo.workspaceId !== machine.workspaceId || repo.archivedAt) {
+      throw new Error("Repo not found for this machine workspace.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const now = nowIso();
+    for (const result of args.results) {
+      const target = await ctx.db.get(result.commentId);
+
+      if (!target || target.prId !== pr._id || target.reviewerId !== args.reviewerId || target.supersededAt) {
+        continue;
+      }
+
+      await ctx.db.patch(target._id, {
+        status: "analyzed",
+        analysisCategory: result.category,
+        analysisReasoning: result.reasoning,
+        analysisDetails: {
+          verdict: result.verdict,
+          severity: result.severity,
+          confidence: result.confidence,
+          accessMode: result.accessMode,
+          evidence: result.evidence,
+        },
+        updatedAt: now,
+      });
+    }
+
+    await ctx.db.insert("timelineEvents", {
+      workspaceId: machine.workspaceId,
+      prId: pr._id,
+      eventType: "comments_analyzed",
+      detail: {
+        reviewerId: args.reviewerId,
+        analyzerAgent: args.analyzerAgent,
+        machineSlug: machine.slug,
+        count: args.results.length,
+        categories: args.results.reduce<Record<string, number>>((acc, result) => {
+          acc[result.category] = (acc[result.category] ?? 0) + 1;
+          return acc;
+        }, {}),
+        source: "local_review_comments",
+      },
+      createdAt: now,
+    });
+
+    return { ok: true, analyzed: args.results.length };
   },
 });

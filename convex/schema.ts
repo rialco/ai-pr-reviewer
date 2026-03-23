@@ -168,6 +168,31 @@ export default defineSchema({
     status: v.string(),
     analysisCategory: v.optional(v.string()),
     analysisReasoning: v.optional(v.string()),
+    analysisDetails: v.optional(
+      v.object({
+        verdict: v.optional(
+          v.union(v.literal("ACTIONABLE"), v.literal("DISMISS"), v.literal("ALREADY_ADDRESSED")),
+        ),
+        severity: v.optional(
+          v.union(v.literal("MUST_FIX"), v.literal("SHOULD_FIX"), v.literal("NICE_TO_HAVE"), v.null()),
+        ),
+        confidence: v.optional(v.union(v.number(), v.null())),
+        accessMode: v.optional(v.union(v.literal("FULL_CODEBASE"), v.literal("DIFF_ONLY"))),
+        evidence: v.optional(
+          v.union(
+            v.object({
+              filesRead: v.array(v.string()),
+              symbolsChecked: v.array(v.string()),
+              callersChecked: v.array(v.string()),
+              testsChecked: v.array(v.string()),
+              riskSummary: v.optional(v.string()),
+              validationNotes: v.optional(v.string()),
+            }),
+            v.null(),
+          ),
+        ),
+      }),
+    ),
     suggestion: v.optional(v.string()),
     publishedAt: v.optional(v.string()),
     supersededAt: v.optional(v.string()),

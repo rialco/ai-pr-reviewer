@@ -7,8 +7,10 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 import { buildReviewPrompt, parseReviewOutput } from "../server/infrastructure/reviewers/reviewPrompt";
+import { analyzeComments, type AnalysisProgressEvent, type AnalyzerAgent } from "../server/services/analyzer";
 import { getPRDiff } from "../server/services/github";
 import { fetchOrigin } from "../server/services/git";
+import type { BotComment, RepoConfig } from "../server/types";
 import {
   loadWorkerConfig,
   readWorkerSession,
@@ -752,6 +754,181 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
         } catch {}
       }
     }
+  }
+
+  if (job.kind === "analyze_comments") {
+    const source = typeof payload?.source === "string" ? payload.source : null;
+    const repoId = typeof payload?.repoId === "string" ? (payload.repoId as Id<"repos">) : null;
+    const repoLabel = typeof payload?.repoLabel === "string" ? payload.repoLabel : null;
+    const owner = typeof payload?.owner === "string" ? payload.owner : null;
+    const repoName = typeof payload?.repo === "string" ? payload.repo : null;
+    const prNumber = typeof payload?.prNumber === "number" ? payload.prNumber : null;
+    const prTitle = typeof payload?.prTitle === "string" ? payload.prTitle : null;
+    const localPath = typeof payload?.localPath === "string" ? payload.localPath : null;
+    const reviewerId =
+      payload?.reviewerId === "claude" || payload?.reviewerId === "codex"
+        ? payload.reviewerId
+        : null;
+    const analyzerAgent =
+      payload?.analyzerAgent === "claude" || payload?.analyzerAgent === "codex"
+        ? (payload.analyzerAgent as AnalyzerAgent)
+        : null;
+
+    if (
+      source !== "local_review_comments" ||
+      !repoId ||
+      !repoLabel ||
+      !owner ||
+      !repoName ||
+      !prNumber ||
+      !prTitle ||
+      !localPath ||
+      !reviewerId ||
+      !analyzerAgent
+    ) {
+      throw new Error("analyze_comments payload is missing repo or review analysis context.");
+    }
+
+    const pendingComments = await client.query(api.reviews.listCommentsForMachine, {
+      machineToken: session.machineToken,
+      repoId,
+      prNumber,
+      reviewerId,
+    });
+
+    if (pendingComments.length === 0) {
+      return {
+        output: [
+          `[analyze_comments] completed at ${now}`,
+          `[analyze_comments] repo=${repoLabel}`,
+          `[analyze_comments] reviewer=${reviewerId}`,
+          "[analyze_comments] no pending review comments found",
+        ],
+        steps: [
+          {
+            step: "load_review_comments",
+            detail: "No pending review comments to analyze",
+            status: "done" as const,
+            ts: now,
+          },
+        ],
+      };
+    }
+
+    const commentIdMap = new Map<number, Id<"reviewComments">>();
+    const botComments: BotComment[] = pendingComments.map((comment, index) => {
+      const syntheticId = index + 1;
+      commentIdMap.set(syntheticId, comment._id);
+      return {
+        id: syntheticId,
+        prNumber,
+        prTitle,
+        prUrl: `https://github.com/${repoLabel}/pull/${prNumber}`,
+        repo: repoLabel,
+        path: comment.path,
+        line: comment.line,
+        diffHunk: null,
+        body: comment.body,
+        user: comment.reviewerId,
+        createdAt: comment.createdAt,
+        url: null,
+        type: "inline",
+      };
+    });
+    const repoConfig: RepoConfig = {
+      owner,
+      repo: repoName,
+      label: repoLabel,
+      botUsers: [],
+      localPath,
+    };
+    const progressOutput: string[] = [];
+    const analysisResults = await analyzeComments(
+      botComments,
+      repoConfig,
+      analyzerAgent,
+      (event: AnalysisProgressEvent) => {
+        if (event.type !== "progress") {
+          return;
+        }
+        if (event.step === "claude_output" || event.step === "codex_output") {
+          progressOutput.push(event.message);
+          return;
+        }
+        if (event.detail) {
+          progressOutput.push(`${event.step}: ${event.message} · ${event.detail}`);
+          return;
+        }
+        progressOutput.push(`${event.step}: ${event.message}`);
+      },
+    );
+
+    await client.mutation(api.reviews.applyReviewCommentAnalysisResults, {
+      machineToken: session.machineToken,
+      repoId,
+      prNumber,
+      reviewerId,
+      analyzerAgent,
+      results: analysisResults
+        .map((result) => {
+          const commentId = commentIdMap.get(result.commentId);
+          if (!commentId) {
+            return null;
+          }
+
+          return {
+            commentId,
+            category: result.category,
+            reasoning: result.reasoning,
+            verdict: result.verdict,
+            severity: result.severity ?? undefined,
+            confidence: result.confidence ?? undefined,
+            accessMode: result.accessMode,
+            evidence: result.evidence
+              ? {
+                  filesRead: result.evidence.filesRead,
+                  symbolsChecked: result.evidence.symbolsChecked,
+                  callersChecked: result.evidence.callersChecked,
+                  testsChecked: result.evidence.testsChecked,
+                  riskSummary: result.evidence.riskSummary,
+                  validationNotes: result.evidence.validationNotes,
+                }
+              : undefined,
+          };
+        })
+        .filter((result): result is NonNullable<typeof result> => result !== null),
+    });
+
+    return {
+      output: [
+        `[analyze_comments] completed at ${now}`,
+        `[analyze_comments] repo=${repoLabel}`,
+        `[analyze_comments] reviewer=${reviewerId}`,
+        `[analyze_comments] analyzer=${analyzerAgent}`,
+        `[analyze_comments] analyzed=${analysisResults.length}`,
+        ...progressOutput.slice(-12),
+      ],
+      steps: [
+        {
+          step: "load_review_comments",
+          detail: `${pendingComments.length} pending review comment(s)`,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "triage_review_comments",
+          detail: analyzerAgent,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "persist_review_analysis",
+          detail: `Stored ${analysisResults.length} triaged review comment(s) in Convex`,
+          status: "done" as const,
+          ts: now,
+        },
+      ],
+    };
   }
 
   throw new Error(`Unsupported job kind: ${job.kind}`);

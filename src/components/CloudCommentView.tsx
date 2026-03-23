@@ -29,6 +29,8 @@ function timelineLabel(eventType: string) {
   if (eventType === "refresh_requested") return "Refresh requested";
   if (eventType === "refresh_failed") return "Refresh failed";
   if (eventType === "comments_fetched") return "GitHub snapshot updated";
+  if (eventType === "analysis_requested") return "Review comment analysis requested";
+  if (eventType === "analysis_failed") return "Review comment analysis failed";
   return eventType.replaceAll("_", " ");
 }
 
@@ -36,6 +38,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const { activeWorkspaceId } = useActiveWorkspace();
   const enqueuePrRefresh = useMutation(api.jobs.enqueuePrRefresh);
   const enqueueReviewRequest = useMutation(api.jobs.enqueueReviewRequest);
+  const enqueueReviewCommentAnalysis = useMutation(api.jobs.enqueueReviewCommentAnalysis);
   const detail = useQuery(
     api.prs.getDetailForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
@@ -63,6 +66,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [selectedMachineSlug, setSelectedMachineSlug] = useState<string>("");
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
 
   const repoMachineConfigs = useMemo(
     () => (machineConfigs ?? []).filter((config) => config.repoLabel === repo),
@@ -81,6 +85,16 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
 
   const selectedMachine = repoMachineConfigs.find((config) => config.machineSlug === selectedMachineSlug) ?? null;
   const selectedMachineRecord = machines?.find((machine) => machine.slug === selectedMachineSlug) ?? null;
+  const pendingReviewCommentCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const comment of reviewComments ?? []) {
+      if (comment.status !== "new" && comment.status !== "analyzing") {
+        continue;
+      }
+      counts.set(comment.reviewerId, (counts.get(comment.reviewerId) ?? 0) + 1);
+    }
+    return counts;
+  }, [reviewComments]);
 
   if (!activeWorkspaceId || detail === undefined) {
     return (
@@ -138,6 +152,29 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       });
     } catch (error) {
       setReviewError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleAnalyzeReviewComments = async (
+    reviewerId: "claude" | "codex",
+    analyzerAgent: "claude" | "codex",
+  ) => {
+    if (!activeWorkspaceId || !selectedMachineSlug) {
+      return;
+    }
+
+    try {
+      setAnalysisError(null);
+      await enqueueReviewCommentAnalysis({
+        workspaceId: activeWorkspaceId,
+        repoLabel: repo,
+        prNumber,
+        machineSlug: selectedMachineSlug,
+        reviewerId,
+        analyzerAgent,
+      });
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -272,6 +309,11 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   {reviewError}
                 </div>
               ) : null}
+              {analysisError ? (
+                <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {analysisError}
+                </div>
+              ) : null}
 
               {comments.length === 0 ? (
                 <div className="mt-3 rounded-xl border border-dashed border-white/10 px-4 py-6 text-sm text-muted-foreground">
@@ -363,6 +405,40 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                 Review Comments
               </p>
+              {selectedMachineRecord ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {(["claude", "codex"] as const).map((reviewerId) => {
+                    const pendingCount = pendingReviewCommentCounts.get(reviewerId) ?? 0;
+                    if (pendingCount === 0) return null;
+
+                    return (
+                      <div key={`${reviewerId}-analysis-actions`} className="flex flex-wrap items-center gap-2 rounded-lg border border-white/8 bg-black/10 px-3 py-2">
+                        <span className="text-xs text-muted-foreground">
+                          {reviewerId} has {pendingCount} pending comment{pendingCount === 1 ? "" : "s"}
+                        </span>
+                        {selectedMachineRecord.capabilities.claude ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handleAnalyzeReviewComments(reviewerId, "claude")}
+                          >
+                            Triage with Claude
+                          </Button>
+                        ) : null}
+                        {selectedMachineRecord.capabilities.codex ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handleAnalyzeReviewComments(reviewerId, "codex")}
+                          >
+                            Triage with Codex
+                          </Button>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
               {reviewComments && reviewComments.length > 0 ? (
                 <div className="mt-3 space-y-3">
                   {reviewComments.map((comment) => (
@@ -371,10 +447,23 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                         <Badge variant="outline">{comment.reviewerId}</Badge>
                         <Badge variant="outline">{comment.path}:{comment.line}</Badge>
                         <Badge variant="outline">{comment.status}</Badge>
+                        {comment.analysisCategory ? (
+                          <Badge variant="outline">{comment.analysisCategory}</Badge>
+                        ) : null}
                       </div>
                       <div className="mt-3 text-sm leading-6 text-foreground/88">
                         <MarkdownBody text={comment.body} />
                       </div>
+                      {comment.analysisReasoning ? (
+                        <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-100/90">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
+                            Triage Reasoning
+                          </p>
+                          <p className="mt-2 whitespace-pre-wrap text-sm leading-6">
+                            {comment.analysisReasoning}
+                          </p>
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -416,7 +505,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               <div className="flex items-start gap-3">
                 <AlertCircle className="mt-0.5 h-4 w-4 text-amber-300" />
                 <div className="text-sm text-amber-100/90">
-                  GitHub PR detail and comments are cloud-backed now. Analysis, fixes, replies, and local review comments are still on the remaining migration path.
+                  GitHub PR detail, review requests, review comments, and comment triage are cloud-backed now. Fixes, replies, and publish flows are still on the remaining migration path.
                 </div>
               </div>
             </Card>
