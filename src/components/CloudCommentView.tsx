@@ -1711,45 +1711,79 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
             ) : null}
 
-            <div className="mt-3 flex flex-wrap justify-end gap-2">
-              {pendingGithubCommentCount > 0
-                ? availableAnalyzerAgents.map((agent) => (
-                    <Button key={`github-analyze-${agent}`} size="sm" onClick={() => void handleAnalyzeGithubComments(agent)}>
-                      <Sparkles className="h-3.5 w-3.5" />
-                      <AgentInlineLabel agent={agent} prefix="Analyze with" />
-                    </Button>
-                  ))
-                : null}
-              {githubReanalyzableCount > 0
-                ? availableAnalyzerAgents.map((agent) => (
-                    <Button
-                      key={`github-reanalyze-${agent}`}
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void handleAnalyzeGithubComments(agent, true)}
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" />
-                      <AgentInlineLabel agent={agent} prefix="Re-analyze with" />
-                    </Button>
-                  ))
-                : null}
-              {fixableGithubCommentCount > 0
-                ? availableFixerAgents.map((agent) => (
-                    <Button key={`github-fix-${agent}`} size="sm" onClick={() => void handleFixGithubComments(agent)}>
-                      <Wrench className="h-3.5 w-3.5" />
-                      <span className="inline-flex items-center gap-1.5">
-                        <AgentInlineLabel agent={agent} prefix="Fix with" />
-                        <span>({fixableGithubCommentCount})</span>
-                      </span>
-                    </Button>
-                  ))
-                : null}
-              {replyableGithubCommentCount > 0 && selectedMachineRecord?.capabilities.gh ? (
-                <Button variant="outline" size="sm" onClick={() => void handleReplyToGithubComments()}>
+            <div className="mt-3 rounded-lg border border-white/8 bg-black/10 px-3 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+                  Actions
+                </div>
+                <span className="text-[11px] text-muted-foreground/70">
+                  {selectedMachineRecord
+                    ? `Using ${selectedMachineRecord.name}`
+                    : "Select a machine checkout to enable comment actions"}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {availableReviewAgents.map((agent) => (
+                  <Button
+                    key={`github-request-review-${agent}`}
+                    variant="outline"
+                    size="sm"
+                    disabled={!selectedMachineSlug}
+                    onClick={() => void handleRequestReview(agent)}
+                  >
+                    <Users className="h-3.5 w-3.5" />
+                    <AgentInlineLabel agent={agent} prefix="Request review with" />
+                  </Button>
+                ))}
+                {availableAnalyzerAgents.map((agent) => (
+                  <Button
+                    key={`github-analyze-${agent}`}
+                    size="sm"
+                    disabled={!selectedMachineSlug || pendingGithubCommentCount === 0}
+                    onClick={() => void handleAnalyzeGithubComments(agent)}
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <AgentInlineLabel agent={agent} prefix="Analyze with" />
+                    <span>({pendingGithubCommentCount})</span>
+                  </Button>
+                ))}
+                {availableAnalyzerAgents.map((agent) => (
+                  <Button
+                    key={`github-reanalyze-${agent}`}
+                    variant="outline"
+                    size="sm"
+                    disabled={!selectedMachineSlug || githubReanalyzableCount === 0}
+                    onClick={() => void handleAnalyzeGithubComments(agent, true)}
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    <AgentInlineLabel agent={agent} prefix="Re-analyze with" />
+                    <span>({githubReanalyzableCount})</span>
+                  </Button>
+                ))}
+                {availableFixerAgents.map((agent) => (
+                  <Button
+                    key={`github-fix-${agent}`}
+                    size="sm"
+                    disabled={!selectedMachineSlug || fixableGithubCommentCount === 0}
+                    onClick={() => void handleFixGithubComments(agent)}
+                  >
+                    <Wrench className="h-3.5 w-3.5" />
+                    <span className="inline-flex items-center gap-1.5">
+                      <AgentInlineLabel agent={agent} prefix="Fix with" />
+                      <span>({fixableGithubCommentCount})</span>
+                    </span>
+                  </Button>
+                ))}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!selectedMachineSlug || !selectedMachineRecord?.capabilities.gh || replyableGithubCommentCount === 0}
+                  onClick={() => void handleReplyToGithubComments()}
+                >
                   <MessageSquareReply className="h-3.5 w-3.5" />
                   Reply ({replyableGithubCommentCount})
                 </Button>
-              ) : null}
+              </div>
             </div>
 
             {comments.length === 0 ? (
@@ -1865,7 +1899,32 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
             ) : null}
             {selectedMachineRecord ? (
-              <div className="flex flex-wrap justify-end gap-2">
+              <div className="space-y-3">
+                <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+                      Actions
+                    </div>
+                    <span className="text-[11px] text-muted-foreground/70">
+                      Using {selectedMachineRecord.name}
+                    </span>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {availableReviewAgents.map((agent) => (
+                      <Button
+                        key={`review-comments-request-${agent}`}
+                        variant="outline"
+                        size="sm"
+                        disabled={!selectedMachineSlug}
+                        onClick={() => void handleRequestReview(agent)}
+                      >
+                        <Users className="h-3.5 w-3.5" />
+                        <AgentInlineLabel agent={agent} prefix="Request review with" />
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
                 {(["claude", "codex"] as const).map((reviewerId) => {
                   const pendingCount = pendingReviewCommentCounts.get(reviewerId) ?? 0;
                   const reanalyzeCount = (reviewComments ?? []).filter(
@@ -1941,6 +2000,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                     </div>
                   );
                 })}
+                </div>
               </div>
             ) : null}
             {reviewComments && reviewComments.length > 0 ? (
