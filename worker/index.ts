@@ -3,6 +3,7 @@ import os from "os";
 import { execFileSync } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
+import type { Id } from "../convex/_generated/dataModel";
 import {
   loadWorkerConfig,
   readWorkerSession,
@@ -91,7 +92,7 @@ interface ClaimedMachineJob {
   payload: unknown;
 }
 
-async function executeJob(session: WorkerSession, job: ClaimedMachineJob) {
+async function executeJob(client: ConvexHttpClient, session: WorkerSession, job: ClaimedMachineJob) {
   const payload =
     job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
       ? (job.payload as Record<string, unknown>)
@@ -135,11 +136,12 @@ async function executeJob(session: WorkerSession, job: ClaimedMachineJob) {
   }
 
   if (job.kind === "sync_repo") {
+    const repoId = typeof payload?.repoId === "string" ? (payload.repoId as Id<"repos">) : null;
     const repoLabel = typeof payload?.repoLabel === "string" ? payload.repoLabel : null;
     const localPath = typeof payload?.localPath === "string" ? payload.localPath : null;
 
-    if (!repoLabel || !localPath) {
-      throw new Error("sync_repo payload is missing repoLabel or localPath.");
+    if (!repoId || !repoLabel || !localPath) {
+      throw new Error("sync_repo payload is missing repoId, repoLabel, or localPath.");
     }
 
     if (!fs.existsSync(localPath)) {
@@ -165,11 +167,48 @@ async function executeJob(session: WorkerSession, job: ClaimedMachineJob) {
         "--state",
         "open",
         "--json",
-        "number,title,updatedAt",
+        "number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,author,createdAt,updatedAt",
       ],
       { cwd: localPath },
     );
-    const openPrs = JSON.parse(prListJson) as Array<{ number: number; title: string; updatedAt: string }>;
+    const openPrs = JSON.parse(prListJson) as Array<{
+      number: number;
+      title: string;
+      url: string;
+      headRefName?: string;
+      baseRefName?: string;
+      mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | null;
+      mergeStateStatus?:
+        | "BEHIND"
+        | "BLOCKED"
+        | "CLEAN"
+        | "DIRTY"
+        | "DRAFT"
+        | "HAS_HOOKS"
+        | "UNKNOWN"
+        | "UNSTABLE"
+        | null;
+      author?: { login?: string | null } | null;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+
+    await client.mutation(api.prs.upsertRepoSyncSnapshot, {
+      machineToken: session.machineToken,
+      repoId,
+      prs: openPrs.map((pr) => ({
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+        headRefName: pr.headRefName,
+        baseRefName: pr.baseRefName,
+        mergeable: pr.mergeable ?? undefined,
+        mergeStateStatus: pr.mergeStateStatus ?? undefined,
+        author: pr.author?.login ?? "unknown",
+        createdAt: pr.createdAt,
+        updatedAt: pr.updatedAt,
+      })),
+    });
 
     return {
       output: [
@@ -178,6 +217,7 @@ async function executeJob(session: WorkerSession, job: ClaimedMachineJob) {
         `[sync_repo] localPath=${localPath}`,
         `[sync_repo] remote=${remoteUrl}`,
         `[sync_repo] openPrCount=${openPrs.length}`,
+        `[sync_repo] convexSnapshotUpdated=true`,
         `[sync_repo] branchStatus=${branchStatus.replaceAll("\n", " | ")}`,
         ...openPrs.slice(0, 5).map((pr) => `[sync_repo] pr #${pr.number} ${pr.title}`),
       ],
@@ -197,6 +237,12 @@ async function executeJob(session: WorkerSession, job: ClaimedMachineJob) {
         {
           step: "query_open_prs",
           detail: `${openPrs.length} open PR(s) visible through gh`,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "persist_cloud_snapshot",
+          detail: `Updated Convex snapshot for ${openPrs.length} PR(s)`,
           status: "done" as const,
           ts: now,
         },
@@ -257,7 +303,7 @@ async function main() {
       console.log(`[worker] claimed job ${claimedJob._id} (${claimedJob.title})`);
 
       try {
-        const result = await executeJob(session!, claimedJob);
+        const result = await executeJob(client, session!, claimedJob);
         await client.mutation(api.jobs.completeMachineJob, {
           machineToken: session!.machineToken,
           jobId: claimedJob._id,

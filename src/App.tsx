@@ -41,6 +41,19 @@ function RepoCountBadge() {
   return hasCloudEnv ? <CloudRepoCountBadge /> : <LocalRepoCountBadge />;
 }
 
+function useAppSummary() {
+  if (hasCloudEnv) {
+    const workspaces = useQuery(api.workspaces.listForCurrentUser);
+    const activeWorkspaceId = workspaces?.[0]?._id;
+    return useQuery(
+      api.prs.dashboardSummary,
+      activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+    );
+  }
+
+  return useSummary().data;
+}
+
 export function App() {
   const [selectedPR, setSelectedPR] = useState<{
     repo: string;
@@ -48,7 +61,7 @@ export function App() {
   } | null>(null);
   const [footerPopover, setFooterPopover] = useState<"activity" | "coordinator" | null>(null);
   const [reposCollapsed, setReposCollapsed] = useState(false);
-  const { data: summary } = useSummary();
+  const summary = useAppSummary();
 
   return (
     <div className="flex h-full">

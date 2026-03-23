@@ -13,6 +13,7 @@ import type * as jobs from "../jobs.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_machineAuth from "../lib/machineAuth.js";
 import type * as machines from "../machines.js";
+import type * as prs from "../prs.js";
 import type * as repos from "../repos.js";
 import type * as workspaces from "../workspaces.js";
 
@@ -28,6 +29,7 @@ declare const fullApi: ApiFromModules<{
   "lib/auth": typeof lib_auth;
   "lib/machineAuth": typeof lib_machineAuth;
   machines: typeof machines;
+  prs: typeof prs;
   repos: typeof repos;
   workspaces: typeof workspaces;
 }>;
