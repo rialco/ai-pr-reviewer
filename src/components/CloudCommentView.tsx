@@ -1,11 +1,13 @@
-import { useQuery } from "convex/react";
-import { AlertCircle, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, Loader2, MessageSquare, Minus, Plus, RefreshCw } from "lucide-react";
+import { useMutation, useQuery } from "convex/react";
+import { useEffect, useMemo, useState } from "react";
+import { AlertCircle, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, Loader2, MessageSquare, Minus, Plus, RefreshCw, History } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { MarkdownBody } from "./MarkdownBody";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 
 interface CloudCommentViewProps {
   repo: string;
@@ -23,12 +25,47 @@ function CommentTypeBadge({ type }: { type: "inline" | "review" | "issue_comment
   return <Badge variant="outline">{label}</Badge>;
 }
 
+function timelineLabel(eventType: string) {
+  if (eventType === "refresh_requested") return "Refresh requested";
+  if (eventType === "refresh_failed") return "Refresh failed";
+  if (eventType === "comments_fetched") return "GitHub snapshot updated";
+  return eventType.replaceAll("_", " ");
+}
+
 export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const { activeWorkspaceId } = useActiveWorkspace();
+  const enqueuePrRefresh = useMutation(api.jobs.enqueuePrRefresh);
   const detail = useQuery(
     api.prs.getDetailForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
   );
+  const timeline = useQuery(
+    api.prs.listTimelineForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
+  );
+  const machineConfigs = useQuery(
+    api.repos.listMachineConfigsForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+  );
+  const [selectedMachineSlug, setSelectedMachineSlug] = useState<string>("");
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+
+  const repoMachineConfigs = useMemo(
+    () => (machineConfigs ?? []).filter((config) => config.repoLabel === repo),
+    [machineConfigs, repo],
+  );
+
+  useEffect(() => {
+    if (repoMachineConfigs.length === 0) {
+      setSelectedMachineSlug("");
+      return;
+    }
+    if (!repoMachineConfigs.some((config) => config.machineSlug === selectedMachineSlug)) {
+      setSelectedMachineSlug(repoMachineConfigs[0].machineSlug);
+    }
+  }, [repoMachineConfigs, selectedMachineSlug]);
+
+  const selectedMachine = repoMachineConfigs.find((config) => config.machineSlug === selectedMachineSlug) ?? null;
 
   if (!activeWorkspaceId || detail === undefined) {
     return (
@@ -51,6 +88,24 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
 
   const { pr, comments } = detail;
   const previewFiles = pr.files.slice(0, 8);
+
+  const handleRefresh = async () => {
+    if (!activeWorkspaceId || !selectedMachineSlug) {
+      return;
+    }
+
+    try {
+      setRefreshError(null);
+      await enqueuePrRefresh({
+        workspaceId: activeWorkspaceId,
+        repoLabel: repo,
+        prNumber,
+        machineSlug: selectedMachineSlug,
+      });
+    } catch (error) {
+      setRefreshError(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   return (
     <div className="space-y-6 px-6 py-5">
@@ -92,12 +147,39 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
             </div>
 
-            <a href={pr.url} target="_blank" rel="noopener noreferrer" className="shrink-0">
-              <Button variant="outline" size="sm">
-                <ExternalLink className="h-3.5 w-3.5" />
-                Open on GitHub
-              </Button>
-            </a>
+            <div className="flex shrink-0 items-center gap-2">
+              {repoMachineConfigs.length > 0 ? (
+                <>
+                  <Select value={selectedMachineSlug} onValueChange={setSelectedMachineSlug}>
+                    <SelectTrigger className="w-[210px] bg-black/10 text-xs">
+                      <SelectValue placeholder="Choose machine" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {repoMachineConfigs.map((config) => (
+                        <SelectItem key={config._id} value={config.machineSlug}>
+                          {config.machineName} · {config.machineStatus}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!selectedMachineSlug}
+                    onClick={() => void handleRefresh()}
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Refresh PR
+                  </Button>
+                </>
+              ) : null}
+              <a href={pr.url} target="_blank" rel="noopener noreferrer" className="shrink-0">
+                <Button variant="outline" size="sm">
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Open on GitHub
+                </Button>
+              </a>
+            </div>
           </div>
         </div>
 
@@ -123,9 +205,14 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 </p>
                 <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
                   <RefreshCw className="h-3.5 w-3.5" />
-                  Refresh by syncing this repo on a linked machine
+                  {selectedMachine ? `Refresh via ${selectedMachine.machineName}` : "Register a machine checkout to refresh"}
                 </span>
               </div>
+              {refreshError ? (
+                <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {refreshError}
+                </div>
+              ) : null}
 
               {comments.length === 0 ? (
                 <div className="mt-3 rounded-xl border border-dashed border-white/10 px-4 py-6 text-sm text-muted-foreground">
@@ -181,6 +268,35 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 </div>
               ) : (
                 <p className="mt-3 text-sm text-muted-foreground">No file metadata was synced yet.</p>
+              )}
+            </Card>
+
+            <Card className="border-white/8 bg-zinc-900/45 p-4">
+              <div className="flex items-center gap-2">
+                <History className="h-4 w-4 text-muted-foreground" />
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Timeline
+                </p>
+              </div>
+              {timeline && timeline.length > 0 ? (
+                <div className="mt-3 space-y-3">
+                  {timeline.slice(0, 8).map((event) => (
+                    <div key={event._id} className="rounded-lg border border-white/8 bg-black/10 px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-foreground/88">{timelineLabel(event.eventType)}</span>
+                        <span className="text-[10px] text-muted-foreground">{formatTimestamp(event.createdAt)}</span>
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        {"machineSlug" in event.detail && typeof event.detail.machineSlug === "string" ? `${event.detail.machineSlug}` : null}
+                        {"commentCount" in event.detail && typeof event.detail.commentCount === "number" ? ` · ${event.detail.commentCount} comments` : null}
+                        {"changedFiles" in event.detail && typeof event.detail.changedFiles === "number" ? ` · ${event.detail.changedFiles} files` : null}
+                        {"errorMessage" in event.detail && typeof event.detail.errorMessage === "string" ? ` · ${event.detail.errorMessage}` : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-muted-foreground">No cloud timeline entries yet for this PR.</p>
               )}
             </Card>
 
