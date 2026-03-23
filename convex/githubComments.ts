@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
-import { nowIso } from "./lib/auth";
+import { nowIso, requireWorkspaceAccess } from "./lib/auth";
 import { requireMachineByToken } from "./lib/machineAuth";
 
 async function getRepoAndPrForMachine(
@@ -338,5 +338,49 @@ export const markReplied = mutation({
     });
 
     return { ok: true, replied: args.replies.length };
+  },
+});
+
+export const recategorizeForWorkspace = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    commentId: v.id("githubComments"),
+    category: v.union(
+      v.literal("MUST_FIX"),
+      v.literal("SHOULD_FIX"),
+      v.literal("NICE_TO_HAVE"),
+      v.literal("DISMISS"),
+      v.literal("ALREADY_ADDRESSED"),
+    ),
+  },
+  handler: async (ctx, args) => {
+    await requireWorkspaceAccess(ctx, args.workspaceId);
+    const comment = await ctx.db.get(args.commentId);
+
+    if (!comment || comment.workspaceId !== args.workspaceId) {
+      throw new Error("Comment not found.");
+    }
+
+    const now = nowIso();
+    await ctx.db.patch(comment._id, {
+      status: "analyzed",
+      analysisCategory: args.category,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("timelineEvents", {
+      workspaceId: args.workspaceId,
+      prId: comment.prId,
+      eventType: "comment_recategorized",
+      detail: {
+        commentId: comment._id,
+        githubCommentId: comment.githubCommentId,
+        category: args.category,
+        source: "github_comments",
+      },
+      createdAt: now,
+    });
+
+    return { ok: true };
   },
 });
