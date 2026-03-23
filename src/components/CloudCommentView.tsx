@@ -700,6 +700,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
   );
   const [selectedMachineSlug, setSelectedMachineSlug] = useState<string>("");
+  const [preferredActionAgent, setPreferredActionAgent] = useState<"claude" | "codex" | "">("");
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
@@ -760,51 +761,22 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   );
   const suggestedAnalyzerAgent = availableAnalyzerAgents[0] ?? null;
   const suggestedFixerAgent = availableFixerAgents[0] ?? null;
-  const pendingReviewCommentCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const comment of reviewComments ?? []) {
-      if (comment.status !== "new" && comment.status !== "analyzing") {
-        continue;
+
+  useEffect(() => {
+    if (availableAnalyzerAgents.length === 0) {
+      if (preferredActionAgent !== "") {
+        setPreferredActionAgent("");
       }
-      counts.set(comment.reviewerId, (counts.get(comment.reviewerId) ?? 0) + 1);
+      return;
     }
-    return counts;
-  }, [reviewComments]);
-  const fixableReviewCommentCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const comment of reviewComments ?? []) {
-      if (
-        comment.analysisCategory !== "MUST_FIX" &&
-        comment.analysisCategory !== "SHOULD_FIX"
-      ) {
-        continue;
-      }
-      if (comment.status !== "analyzed" && comment.status !== "fix_failed") {
-        continue;
-      }
-      counts.set(comment.reviewerId, (counts.get(comment.reviewerId) ?? 0) + 1);
+
+    if (
+      preferredActionAgent === "" ||
+      !availableAnalyzerAgents.includes(preferredActionAgent)
+    ) {
+      setPreferredActionAgent(availableAnalyzerAgents[0]);
     }
-    return counts;
-  }, [reviewComments]);
-  const publishableReviewCommentCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const comment of reviewComments ?? []) {
-      if (comment.publishedAt || comment.supersededAt) {
-        continue;
-      }
-      if (comment.status !== "analyzed") {
-        continue;
-      }
-      if (
-        comment.analysisCategory === "DISMISS" ||
-        comment.analysisCategory === "ALREADY_ADDRESSED"
-      ) {
-        continue;
-      }
-      counts.set(comment.reviewerId, (counts.get(comment.reviewerId) ?? 0) + 1);
-    }
-    return counts;
-  }, [reviewComments]);
+  }, [availableAnalyzerAgents, preferredActionAgent]);
   const githubComments = detail?.comments ?? [];
   const pendingGithubCommentCount = useMemo(
     () =>
@@ -935,6 +907,28 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   );
   const reviewReanalyzableCount = useMemo(
     () => (reviewComments ?? []).filter((comment) => !comment.supersededAt && (comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed")).length,
+    [reviewComments],
+  );
+  const reviewFixableCount = useMemo(
+    () =>
+      (reviewComments ?? []).filter(
+        (comment) =>
+          !comment.supersededAt &&
+          (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX") &&
+          (comment.status === "analyzed" || comment.status === "fix_failed"),
+      ).length,
+    [reviewComments],
+  );
+  const publishableReviewCount = useMemo(
+    () =>
+      (reviewComments ?? []).filter(
+        (comment) =>
+          !comment.supersededAt &&
+          !comment.publishedAt &&
+          comment.status === "analyzed" &&
+          comment.analysisCategory !== "DISMISS" &&
+          comment.analysisCategory !== "ALREADY_ADDRESSED",
+      ).length,
     [reviewComments],
   );
   const githubFilterTabs = useMemo<CommentFilterTab[]>(
@@ -1195,6 +1189,46 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
 
     for (const reviewerId of reviewerIds) {
       await handleAnalyzeReviewComments(reviewerId, analyzerAgent, reanalyze);
+    }
+  };
+
+  const handleFixPendingReviewComments = async (fixerAgent: "claude" | "codex") => {
+    const reviewerIds = Array.from(
+      new Set(
+        (reviewComments ?? [])
+          .filter(
+            (comment) =>
+              !comment.supersededAt &&
+              (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX") &&
+              (comment.status === "analyzed" || comment.status === "fix_failed"),
+          )
+          .map((comment) => comment.reviewerId),
+      ),
+    ) as Array<"claude" | "codex">;
+
+    for (const reviewerId of reviewerIds) {
+      await handleFixReviewComments(reviewerId, fixerAgent);
+    }
+  };
+
+  const handlePublishAvailableReviews = async () => {
+    const reviewerIds = Array.from(
+      new Set(
+        (reviewComments ?? [])
+          .filter(
+            (comment) =>
+              !comment.supersededAt &&
+              !comment.publishedAt &&
+              comment.status === "analyzed" &&
+              comment.analysisCategory !== "DISMISS" &&
+              comment.analysisCategory !== "ALREADY_ADDRESSED",
+          )
+          .map((comment) => comment.reviewerId),
+      ),
+    ) as Array<"claude" | "codex">;
+
+    for (const reviewerId of reviewerIds) {
+      await handlePublishReview(reviewerId);
     }
   };
 
@@ -1705,55 +1739,56 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                     : "Select a machine checkout to enable comment actions"}
                 </span>
               </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {availableAnalyzerAgents.map((agent) => (
-                  <Button
-                    key={`github-analyze-${agent}`}
-                    size="sm"
-                    disabled={!selectedMachineSlug || pendingGithubCommentCount === 0}
-                    onClick={() => void handleAnalyzeGithubComments(agent)}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {selectedMachineSlug && availableAnalyzerAgents.length > 0 ? (
+                  <Select
+                    value={preferredActionAgent}
+                    onValueChange={(value) => setPreferredActionAgent(value as "claude" | "codex")}
                   >
+                    <SelectTrigger className="h-8 w-[190px] bg-transparent text-xs">
+                      {preferredActionAgent ? (
+                        <AgentInlineLabel agent={preferredActionAgent} prefix="Preferred agent" />
+                      ) : (
+                        <SelectValue placeholder="Preferred agent" />
+                      )}
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableAnalyzerAgents.map((agent) => (
+                        <SelectItem key={`github-action-agent-${agent}`} value={agent}>
+                          {getAgentLabel(agent)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : null}
+                {selectedMachineSlug && preferredActionAgent && pendingGithubCommentCount > 0 ? (
+                  <Button size="sm" onClick={() => void handleAnalyzeGithubComments(preferredActionAgent)}>
                     <Sparkles className="h-3.5 w-3.5" />
-                    <AgentInlineLabel agent={agent} prefix="Analyze with" />
-                    <span>({pendingGithubCommentCount})</span>
+                    Analyze ({pendingGithubCommentCount})
                   </Button>
-                ))}
-                {availableAnalyzerAgents.map((agent) => (
+                ) : null}
+                {selectedMachineSlug && preferredActionAgent && githubReanalyzableCount > 0 ? (
                   <Button
-                    key={`github-reanalyze-${agent}`}
                     variant="outline"
                     size="sm"
-                    disabled={!selectedMachineSlug || githubReanalyzableCount === 0}
-                    onClick={() => void handleAnalyzeGithubComments(agent, true)}
+                    onClick={() => void handleAnalyzeGithubComments(preferredActionAgent, true)}
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
-                    <AgentInlineLabel agent={agent} prefix="Re-analyze with" />
-                    <span>({githubReanalyzableCount})</span>
+                    Re-analyze ({githubReanalyzableCount})
                   </Button>
-                ))}
-                {availableFixerAgents.map((agent) => (
-                  <Button
-                    key={`github-fix-${agent}`}
-                    size="sm"
-                    disabled={!selectedMachineSlug || fixableGithubCommentCount === 0}
-                    onClick={() => void handleFixGithubComments(agent)}
-                  >
+                ) : null}
+                {selectedMachineSlug && preferredActionAgent && fixableGithubCommentCount > 0 ? (
+                  <Button size="sm" onClick={() => void handleFixGithubComments(preferredActionAgent)}>
                     <Wrench className="h-3.5 w-3.5" />
-                    <span className="inline-flex items-center gap-1.5">
-                      <AgentInlineLabel agent={agent} prefix="Fix with" />
-                      <span>({fixableGithubCommentCount})</span>
-                    </span>
+                    Fix ({fixableGithubCommentCount})
                   </Button>
-                ))}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!selectedMachineSlug || !selectedMachineRecord?.capabilities.gh || replyableGithubCommentCount === 0}
-                  onClick={() => void handleReplyToGithubComments()}
-                >
-                  <MessageSquareReply className="h-3.5 w-3.5" />
-                  Reply ({replyableGithubCommentCount})
-                </Button>
+                ) : null}
+                {selectedMachineSlug && selectedMachineRecord?.capabilities.gh && replyableGithubCommentCount > 0 ? (
+                  <Button variant="outline" size="sm" onClick={() => void handleReplyToGithubComments()}>
+                    <MessageSquareReply className="h-3.5 w-3.5" />
+                    Reply ({replyableGithubCommentCount})
+                  </Button>
+                ) : null}
               </div>
             </div>
 
@@ -1874,107 +1909,56 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                     Using {selectedMachineRecord.name}
                   </span>
                 </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {availableReviewAgents.map((agent) => (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {selectedMachineSlug && availableAnalyzerAgents.length > 0 ? (
+                    <Select
+                      value={preferredActionAgent}
+                      onValueChange={(value) => setPreferredActionAgent(value as "claude" | "codex")}
+                    >
+                      <SelectTrigger className="h-8 w-[190px] bg-transparent text-xs">
+                        {preferredActionAgent ? (
+                          <AgentInlineLabel agent={preferredActionAgent} prefix="Preferred agent" />
+                        ) : (
+                          <SelectValue placeholder="Preferred agent" />
+                        )}
+                      </SelectTrigger>
+                      <SelectContent>
+                        {availableAnalyzerAgents.map((agent) => (
+                          <SelectItem key={`review-action-agent-${agent}`} value={agent}>
+                            {getAgentLabel(agent)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : null}
+                  {selectedMachineSlug && preferredActionAgent && reviewPending.length > 0 ? (
+                    <Button size="sm" onClick={() => void handleAnalyzePendingReviewComments(preferredActionAgent)}>
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Analyze ({reviewPending.length})
+                    </Button>
+                  ) : null}
+                  {selectedMachineSlug && preferredActionAgent && reviewReanalyzableCount > 0 ? (
                     <Button
-                      key={`review-comments-request-${agent}`}
                       variant="outline"
                       size="sm"
-                      disabled={!selectedMachineSlug}
-                      onClick={() => void handleRequestReview(agent)}
+                      onClick={() => void handleAnalyzePendingReviewComments(preferredActionAgent, true)}
                     >
-                      <Users className="h-3.5 w-3.5" />
-                      <AgentInlineLabel agent={agent} prefix="Request review with" />
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Re-analyze ({reviewReanalyzableCount})
                     </Button>
-                  ))}
-                  {(["claude", "codex"] as const).map((reviewerId) => {
-                  const pendingCount = pendingReviewCommentCounts.get(reviewerId) ?? 0;
-                  const reanalyzeCount = (reviewComments ?? []).filter(
-                    (comment) =>
-                      comment.reviewerId === reviewerId &&
-                      !comment.supersededAt &&
-                      (comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed"),
-                  ).length;
-                  const fixCount = (reviewComments ?? []).filter(
-                    (comment) =>
-                      comment.reviewerId === reviewerId &&
-                      !comment.supersededAt &&
-                      (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX") &&
-                      (comment.status === "analyzed" || comment.status === "fix_failed"),
-                  ).length;
-                  const publishCount = publishableReviewCommentCounts.get(reviewerId) ?? 0;
-                  if (pendingCount === 0 && reanalyzeCount === 0 && fixCount === 0 && publishCount === 0) return null;
-
-                  return (
-                    <>
-                      {pendingCount > 0
-                        ? availableAnalyzerAgents.map((agent) => (
-                            <Button
-                              key={`${reviewerId}-analyze-${agent}`}
-                              size="sm"
-                              onClick={() => void handleAnalyzeReviewComments(reviewerId, agent)}
-                            >
-                              <Sparkles className="h-3.5 w-3.5" />
-                              <span className="inline-flex items-center gap-1.5">
-                                <span>Analyze</span>
-                                <AgentInlineLabel agent={reviewerId} />
-                                <span>comments with</span>
-                                <AgentInlineLabel agent={agent} />
-                                <span>({pendingCount})</span>
-                              </span>
-                            </Button>
-                          ))
-                        : null}
-                      {reanalyzeCount > 0
-                        ? availableAnalyzerAgents.map((agent) => (
-                            <Button
-                              key={`${reviewerId}-reanalyze-${agent}`}
-                              variant="outline"
-                              size="sm"
-                              onClick={() => void handleAnalyzeReviewComments(reviewerId, agent, true)}
-                            >
-                              <RefreshCw className="h-3.5 w-3.5" />
-                              <span className="inline-flex items-center gap-1.5">
-                                <span>Re-analyze</span>
-                                <AgentInlineLabel agent={reviewerId} />
-                                <span>comments with</span>
-                                <AgentInlineLabel agent={agent} />
-                                <span>({reanalyzeCount})</span>
-                              </span>
-                            </Button>
-                          ))
-                        : null}
-                      {fixCount > 0
-                        ? availableFixerAgents.map((agent) => (
-                            <Button
-                              key={`${reviewerId}-fix-${agent}`}
-                              size="sm"
-                              onClick={() => void handleFixReviewComments(reviewerId, agent)}
-                            >
-                              <Wrench className="h-3.5 w-3.5" />
-                              <span className="inline-flex items-center gap-1.5">
-                                <span>Fix</span>
-                                <AgentInlineLabel agent={reviewerId} />
-                                <span>comments with</span>
-                                <AgentInlineLabel agent={agent} />
-                                <span>({fixCount})</span>
-                              </span>
-                            </Button>
-                          ))
-                        : null}
-                      {publishCount > 0 && selectedMachineRecord.capabilities.gh ? (
-                        <Button variant="outline" size="sm" onClick={() => void handlePublishReview(reviewerId)}>
-                          <Upload className="h-3.5 w-3.5" />
-                          <span className="inline-flex items-center gap-1.5">
-                            <span>Publish</span>
-                            <AgentInlineLabel agent={reviewerId} />
-                            <span>review ({publishCount})</span>
-                          </span>
-                        </Button>
-                      ) : null}
-                    </>
-                  );
-                })}
+                  ) : null}
+                  {selectedMachineSlug && preferredActionAgent && reviewFixableCount > 0 ? (
+                    <Button size="sm" onClick={() => void handleFixPendingReviewComments(preferredActionAgent)}>
+                      <Wrench className="h-3.5 w-3.5" />
+                      Fix ({reviewFixableCount})
+                    </Button>
+                  ) : null}
+                  {selectedMachineSlug && selectedMachineRecord.capabilities.gh && publishableReviewCount > 0 ? (
+                    <Button variant="outline" size="sm" onClick={() => void handlePublishAvailableReviews()}>
+                      <Upload className="h-3.5 w-3.5" />
+                      Publish ({publishableReviewCount})
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             ) : null}
