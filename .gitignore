@@ -8,6 +8,7 @@ data/*.db-wal
 .env*
 !.env.example
 !.env.sample
+.convex/
 .claude/settings.local.json
 .worktrees/
 .DS_Store

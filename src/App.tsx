@@ -20,7 +20,7 @@ export function App() {
   const { data: summary } = useSummary();
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-full">
       {/* Sidebar */}
       <aside className="w-[340px] border-r border-border flex flex-col shrink-0">
         {/* Header */}
