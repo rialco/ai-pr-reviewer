@@ -3,6 +3,8 @@ import { v } from "convex/values";
 import { nowIso, requireWorkspaceAccess } from "./lib/auth";
 import { requireMachineByToken } from "./lib/machineAuth";
 
+const MACHINE_STALE_AFTER_MS = 2 * 60_000;
+
 function makeSecretToken(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
 }
@@ -21,7 +23,13 @@ export const listForWorkspace = query({
 
     return machines
       .sort((a, b) => b.lastHeartbeatAt.localeCompare(a.lastHeartbeatAt))
-      .map(({ authToken: _authToken, ...machine }) => machine);
+      .map(({ authToken: _authToken, ...machine }) => ({
+        ...machine,
+        status:
+          Date.now() - Date.parse(machine.lastHeartbeatAt) > MACHINE_STALE_AFTER_MS
+            ? "offline"
+            : machine.status,
+      }));
   },
 });
 

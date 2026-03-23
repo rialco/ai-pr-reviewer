@@ -1,7 +1,11 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { nowIso, requireWorkspaceAccess } from "./lib/auth";
 import { requireMachineByToken } from "./lib/machineAuth";
+
+const MACHINE_STALE_AFTER_MS = 2 * 60_000;
 
 const machineJobStepValidator = v.array(
   v.object({
@@ -11,6 +15,92 @@ const machineJobStepValidator = v.array(
     ts: v.string(),
   }),
 );
+
+function isHeartbeatStale(lastHeartbeatAt: string): boolean {
+  return Date.now() - Date.parse(lastHeartbeatAt) > MACHINE_STALE_AFTER_MS;
+}
+
+async function recoverStaleClaims(ctx: MutationCtx, workspaceId: Id<"workspaces">) {
+  const now = nowIso();
+  const machines = await ctx.db
+    .query("machines")
+    .withIndex("by_workspaceId", (q) => q.eq("workspaceId", workspaceId))
+    .collect();
+
+  const staleMachineIds = new Set<string>();
+
+  for (const machine of machines) {
+    if (!isHeartbeatStale(machine.lastHeartbeatAt)) {
+      continue;
+    }
+
+    staleMachineIds.add(machine._id);
+    await ctx.db.patch(machine._id, {
+      status: "offline",
+      currentJobId: undefined,
+      currentJobLabel: undefined,
+      updatedAt: now,
+    });
+  }
+
+  if (staleMachineIds.size === 0) {
+    return;
+  }
+
+  const runningJobs = await ctx.db
+    .query("jobs")
+    .withIndex("by_workspaceId_status_createdAt", (q) =>
+      q.eq("workspaceId", workspaceId).eq("status", "running"),
+    )
+    .collect();
+  const claimedJobs = await ctx.db
+    .query("jobs")
+    .withIndex("by_workspaceId_status_createdAt", (q) =>
+      q.eq("workspaceId", workspaceId).eq("status", "claimed"),
+    )
+    .collect();
+
+  for (const job of [...runningJobs, ...claimedJobs]) {
+    if (!job.claimedByMachineId || !staleMachineIds.has(job.claimedByMachineId)) {
+      continue;
+    }
+
+    await ctx.db.patch(job._id, {
+      status: "queued",
+      claimedByMachineId: undefined,
+      claimedAt: undefined,
+      startedAt: undefined,
+      errorMessage: undefined,
+      updatedAt: now,
+    });
+
+    const runs = await ctx.db
+      .query("jobRuns")
+      .withIndex("by_jobId", (q) => q.eq("jobId", job._id))
+      .collect();
+    const runningRun = runs.find((run) => run.status === "running");
+
+    if (runningRun) {
+      await ctx.db.patch(runningRun._id, {
+        status: "error",
+        steps: [
+          ...runningRun.steps.filter((step) => step.status !== "active"),
+          {
+            step: "recovered",
+            detail: "Job returned to queue after machine heartbeat timed out",
+            status: "error",
+            ts: now,
+          },
+        ],
+        output: [
+          ...runningRun.output,
+          "[recovery] returned to queue after machine heartbeat timeout",
+        ],
+        finishedAt: now,
+      });
+    }
+  }
+}
 
 export const listForWorkspace = query({
   args: {
@@ -25,6 +115,22 @@ export const listForWorkspace = query({
       .collect();
 
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  },
+});
+
+export const listRunsForWorkspace = query({
+  args: {
+    workspaceId: v.id("workspaces"),
+  },
+  handler: async (ctx, args) => {
+    await requireWorkspaceAccess(ctx, args.workspaceId);
+
+    const runs = await ctx.db
+      .query("jobRuns")
+      .withIndex("by_workspaceId", (q) => q.eq("workspaceId", args.workspaceId))
+      .collect();
+
+    return runs.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   },
 });
 
@@ -60,6 +166,68 @@ export const enqueue = mutation({
       targetMachineSlug: args.targetMachineSlug,
       title: args.title,
       payload: args.payload,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return await ctx.db.get(jobId);
+  },
+});
+
+export const enqueueRepoSync = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    repoId: v.id("repos"),
+    machineSlug: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { user } = await requireWorkspaceAccess(ctx, args.workspaceId);
+    const repo = await ctx.db.get(args.repoId);
+
+    if (!repo || repo.workspaceId !== args.workspaceId || repo.archivedAt) {
+      throw new Error("Repo not found.");
+    }
+
+    const machine = await ctx.db
+      .query("machines")
+      .withIndex("by_workspaceId_slug", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("slug", args.machineSlug),
+      )
+      .unique();
+
+    if (!machine) {
+      throw new Error("Machine not found in this workspace.");
+    }
+
+    const machineConfig = await ctx.db
+      .query("repoMachineConfigs")
+      .withIndex("by_repoId_machineSlug", (q) =>
+        q.eq("repoId", repo._id).eq("machineSlug", args.machineSlug),
+      )
+      .unique();
+
+    if (!machineConfig) {
+      throw new Error("No checkout is registered for this repo on that machine.");
+    }
+
+    const now = nowIso();
+    const jobId = await ctx.db.insert("jobs", {
+      workspaceId: args.workspaceId,
+      repoId: repo._id,
+      createdByUserId: user._id,
+      kind: "sync_repo",
+      status: "queued",
+      targetMachineSlug: machine.slug,
+      title: `Sync ${repo.label}`,
+      payload: {
+        repoId: repo._id,
+        repoLabel: repo.label,
+        owner: repo.owner,
+        repo: repo.repo,
+        botUsers: repo.botUsers,
+        localPath: machineConfig.localPath,
+        skipTypecheck: machineConfig.skipTypecheck,
+      },
       createdAt: now,
       updatedAt: now,
     });
@@ -111,6 +279,7 @@ export const claimNextForMachine = mutation({
   },
   handler: async (ctx, args) => {
     const machine = await requireMachineByToken(ctx, args.machineToken);
+    await recoverStaleClaims(ctx, machine.workspaceId);
     const now = nowIso();
 
     if (machine.currentJobId) {

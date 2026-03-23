@@ -1,3 +1,4 @@
+import fs from "fs";
 import os from "os";
 import { execFileSync } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
@@ -25,6 +26,14 @@ function detectCapabilities() {
     claude: hasBinary("claude"),
     codex: hasBinary("codex"),
   };
+}
+
+function runCommand(binary: string, args: string[], options?: { cwd?: string }) {
+  return execFileSync(binary, args, {
+    cwd: options?.cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
 }
 
 async function registerMachine(client: ConvexHttpClient, config: ReturnType<typeof loadWorkerConfig>) {
@@ -83,48 +92,119 @@ interface ClaimedMachineJob {
 }
 
 async function executeJob(session: WorkerSession, job: ClaimedMachineJob) {
-  if (job.kind !== "machine_command") {
-    throw new Error(`Unsupported job kind: ${job.kind}`);
-  }
-
   const payload =
     job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
       ? (job.payload as Record<string, unknown>)
       : null;
-  const command = typeof payload?.command === "string" ? payload.command : null;
-
-  if (command !== "self_check") {
-    throw new Error(`Unsupported machine command: ${command ?? "unknown"}`);
-  }
-
-  const capabilities = detectCapabilities();
   const now = new Date().toISOString();
 
-  return {
-    output: [
-      `[self-check] completed at ${now}`,
-      `[self-check] machine=${session.machineId}`,
-      `[self-check] workspace=${session.workspaceId}`,
-      `[self-check] hostname=${os.hostname()}`,
-      `[self-check] platform=${process.platform}/${process.arch}`,
-      `[self-check] cwd=${process.cwd()}`,
-      `[self-check] capabilities=${JSON.stringify(capabilities)}`,
-    ],
-    steps: [
-      {
-        step: "claim",
-        detail: `Claimed by ${os.hostname()}`,
-        status: "done" as const,
-        ts: now,
-      },
-      {
-        step: "self_check",
-        detail: "Collected machine identity and local capability snapshot",
-        status: "done" as const,
-        ts: now,
-      },
-    ],
-  };
+  if (job.kind === "machine_command") {
+    const command = typeof payload?.command === "string" ? payload.command : null;
+
+    if (command !== "self_check") {
+      throw new Error(`Unsupported machine command: ${command ?? "unknown"}`);
+    }
+
+    const capabilities = detectCapabilities();
+
+    return {
+      output: [
+        `[self-check] completed at ${now}`,
+        `[self-check] machine=${session.machineId}`,
+        `[self-check] workspace=${session.workspaceId}`,
+        `[self-check] hostname=${os.hostname()}`,
+        `[self-check] platform=${process.platform}/${process.arch}`,
+        `[self-check] cwd=${process.cwd()}`,
+        `[self-check] capabilities=${JSON.stringify(capabilities)}`,
+      ],
+      steps: [
+        {
+          step: "claim",
+          detail: `Claimed by ${os.hostname()}`,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "self_check",
+          detail: "Collected machine identity and local capability snapshot",
+          status: "done" as const,
+          ts: now,
+        },
+      ],
+    };
+  }
+
+  if (job.kind === "sync_repo") {
+    const repoLabel = typeof payload?.repoLabel === "string" ? payload.repoLabel : null;
+    const localPath = typeof payload?.localPath === "string" ? payload.localPath : null;
+
+    if (!repoLabel || !localPath) {
+      throw new Error("sync_repo payload is missing repoLabel or localPath.");
+    }
+
+    if (!fs.existsSync(localPath)) {
+      throw new Error(`Configured checkout path does not exist: ${localPath}`);
+    }
+
+    const stats = fs.statSync(localPath);
+    if (!stats.isDirectory()) {
+      throw new Error(`Configured checkout path is not a directory: ${localPath}`);
+    }
+
+    const remoteUrl = runCommand("git", ["remote", "get-url", "origin"], { cwd: localPath });
+    const branchStatus = runCommand("git", ["status", "--short", "--branch"], { cwd: localPath });
+    const prListJson = runCommand(
+      "gh",
+      [
+        "pr",
+        "list",
+        "--repo",
+        repoLabel,
+        "--author",
+        "@me",
+        "--state",
+        "open",
+        "--json",
+        "number,title,updatedAt",
+      ],
+      { cwd: localPath },
+    );
+    const openPrs = JSON.parse(prListJson) as Array<{ number: number; title: string; updatedAt: string }>;
+
+    return {
+      output: [
+        `[sync_repo] completed at ${now}`,
+        `[sync_repo] repo=${repoLabel}`,
+        `[sync_repo] localPath=${localPath}`,
+        `[sync_repo] remote=${remoteUrl}`,
+        `[sync_repo] openPrCount=${openPrs.length}`,
+        `[sync_repo] branchStatus=${branchStatus.replaceAll("\n", " | ")}`,
+        ...openPrs.slice(0, 5).map((pr) => `[sync_repo] pr #${pr.number} ${pr.title}`),
+      ],
+      steps: [
+        {
+          step: "verify_checkout",
+          detail: localPath,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "inspect_git_remote",
+          detail: remoteUrl,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "query_open_prs",
+          detail: `${openPrs.length} open PR(s) visible through gh`,
+          status: "done" as const,
+          ts: now,
+        },
+      ],
+    };
+  }
+
+  throw new Error(`Unsupported job kind: ${job.kind}`);
 }
 
 async function main() {
