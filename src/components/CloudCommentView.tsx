@@ -759,6 +759,7 @@ function formatTimelineDetail(event: { eventType: string; detail: Record<string,
 export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const { activeWorkspaceId } = useActiveWorkspace();
   const resetPrData = useMutation(api.prs.resetForWorkspace);
+  const updateSettings = useMutation(api.settings.updateForWorkspace);
   const enqueuePrRefresh = useMutation(api.jobs.enqueuePrRefresh);
   const enqueueGithubCommentAnalysis = useMutation(api.jobs.enqueueGithubCommentAnalysis);
   const enqueueGithubCommentFix = useMutation(api.jobs.enqueueGithubCommentFix);
@@ -771,6 +772,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const detail = useQuery(
     api.prs.getDetailForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
+  );
+  const settings = useQuery(
+    api.settings.getForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
   );
   const timeline = useQuery(
     api.prs.listTimelineForWorkspace,
@@ -854,6 +859,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   );
   const suggestedAnalyzerAgent = availableAnalyzerAgents[0] ?? null;
   const suggestedFixerAgent = availableFixerAgents[0] ?? null;
+  const persistedPreferredActionAgent = settings ? settings.defaultAnalyzerAgent : null;
 
   useEffect(() => {
     if (availableAnalyzerAgents.length === 0) {
@@ -863,13 +869,27 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       return;
     }
 
-    if (
-      preferredActionAgent === "" ||
-      !availableAnalyzerAgents.includes(preferredActionAgent)
-    ) {
-      setPreferredActionAgent(availableAnalyzerAgents[0]);
+    const nextPreferredAgent =
+      (persistedPreferredActionAgent && availableAnalyzerAgents.includes(persistedPreferredActionAgent)
+        ? persistedPreferredActionAgent
+        : null) ?? availableAnalyzerAgents[0];
+
+    if (preferredActionAgent !== nextPreferredAgent) {
+      setPreferredActionAgent(nextPreferredAgent);
     }
-  }, [availableAnalyzerAgents, preferredActionAgent]);
+  }, [availableAnalyzerAgents, persistedPreferredActionAgent, preferredActionAgent]);
+
+  const handlePreferredActionAgentChange = (nextAgent: "claude" | "codex") => {
+    setPreferredActionAgent(nextAgent);
+    if (!activeWorkspaceId) {
+      return;
+    }
+    void updateSettings({
+      workspaceId: activeWorkspaceId,
+      defaultAnalyzerAgent: nextAgent,
+      defaultFixerAgent: nextAgent,
+    });
+  };
   const githubComments = detail?.comments ?? [];
   const pendingGithubCommentCount = useMemo(
     () =>
@@ -1814,7 +1834,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                     <PreferredAgentSelect
                       value={preferredActionAgent}
                       options={availableAnalyzerAgents}
-                      onChange={setPreferredActionAgent}
+                      onChange={handlePreferredActionAgentChange}
                     />
                   ) : null}
                   {selectedMachineSlug && preferredActionAgent && pendingGithubCommentCount > 0 ? (
@@ -1972,7 +1992,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                       <PreferredAgentSelect
                         value={preferredActionAgent}
                         options={availableAnalyzerAgents}
-                        onChange={setPreferredActionAgent}
+                        onChange={handlePreferredActionAgentChange}
                       />
                     ) : null}
                     {selectedMachineSlug && preferredActionAgent && reviewPending.length > 0 ? (
