@@ -25,7 +25,7 @@ Cloud-backed TypeScript app that tracks GitHub PR review comments, coordinates l
 
 - **Convex functions**: `convex/` — auth, repos, PR snapshots, reviews, machines, jobs, settings
 - **Worker**: `worker/index.ts` — enrolls machines, heartbeats, claims jobs, runs local git/gh/Claude/Codex actions
-- **Shared runtime logic**: `server/services/`, `server/infrastructure/reviewers/`, `server/domain/review/`, `server/types.ts` — currently imported by the worker, even though the Express server runtime is gone
+- **Shared runtime logic**: `core/services/`, `core/infrastructure/reviewers/`, `core/domain/review/`, `core/types.ts` — imported by the worker for GitHub, analysis, review, and fix execution
 
 ### Frontend (`src/`)
 

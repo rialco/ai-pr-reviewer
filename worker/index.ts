@@ -6,13 +6,13 @@ import { promisify } from "util";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
-import { buildReviewPrompt, parseReviewOutput } from "../server/infrastructure/reviewers/reviewPrompt";
-import { formatGitHubCommentBody } from "../server/infrastructure/reviewers/reviewPrompt";
-import { analyzeComments, type AnalysisProgressEvent, type AnalyzerAgent } from "../server/services/analyzer";
-import { fixComments, type FixerAgent } from "../server/services/fixer";
-import { getPRDiff, replyToReviewComment, submitPRReview } from "../server/services/github";
-import { fetchOrigin } from "../server/services/git";
-import type { BotComment, CommentState, RepoConfig } from "../server/types";
+import { buildReviewPrompt, parseReviewOutput } from "../core/infrastructure/reviewers/reviewPrompt";
+import { formatGitHubCommentBody } from "../core/infrastructure/reviewers/reviewPrompt";
+import { analyzeComments, type AnalysisProgressEvent, type AnalyzerAgent } from "../core/services/analyzer";
+import { fixComments, type FixerAgent } from "../core/services/fixer";
+import { getPRDiff, replyToReviewComment, submitPRReview } from "../core/services/github";
+import { fetchOrigin } from "../core/services/git";
+import type { BotComment, CommentState, RepoConfig } from "../core/types";
 import {
   loadWorkerConfig,
   readWorkerSession,
