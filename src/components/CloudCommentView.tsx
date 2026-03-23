@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "convex/react";
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, Loader2, MessageSquare, Minus, Plus, RefreshCw, History } from "lucide-react";
+import { AlertCircle, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, Loader2, MessageSquare, Minus, Plus, RefreshCw } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
 import { Badge } from "./ui/badge";
@@ -8,6 +8,7 @@ import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { MarkdownBody } from "./MarkdownBody";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { SectionHeader } from "./ui/section-header";
 
 interface CloudCommentViewProps {
   repo: string;
@@ -365,121 +366,106 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   };
 
   return (
-    <div className="space-y-6 px-6 py-5">
-      <Card className="overflow-hidden border-white/10 bg-zinc-900/70">
-        <div className="border-b border-white/8 px-6 py-5">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                <Badge variant="outline">#{pr.prNumber}</Badge>
-                <Badge variant="outline">{pr.author}</Badge>
-                <span className="text-xs text-muted-foreground">Updated {formatTimestamp(pr.updatedAt)}</span>
+    <div className="relative space-y-4">
+      <div className="sticky top-0 z-20 pb-1">
+        <section className="relative overflow-hidden border-b border-white/6 bg-zinc-800/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur-md">
+          <div className="px-6 py-5">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <Badge variant="outline">#{pr.prNumber}</Badge>
+                  <Badge variant="outline">{pr.author}</Badge>
+                  <span className="text-xs text-muted-foreground">Updated {formatTimestamp(pr.updatedAt)}</span>
+                </div>
+                <h1 className="text-xl font-semibold leading-tight text-foreground/88">{pr.title}</h1>
+                <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground/90">
+                  <span className="inline-flex items-center gap-1.5">
+                    <GitBranch className="h-3.5 w-3.5" />
+                    {pr.baseRefName ?? "unknown"} ← {pr.headRefName ?? "unknown"}
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <FileCode className="h-3.5 w-3.5" />
+                    {pr.changedFiles} file{pr.changedFiles === 1 ? "" : "s"}
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 text-emerald-400">
+                    <Plus className="h-3.5 w-3.5" />
+                    {pr.additions}
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 text-rose-400">
+                    <Minus className="h-3.5 w-3.5" />
+                    {pr.deletions}
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <GitCommitHorizontal className="h-3.5 w-3.5" />
+                    {pr.commitCount} commit{pr.commitCount === 1 ? "" : "s"}
+                  </span>
+                </div>
               </div>
-              <h1 className="text-xl font-semibold leading-tight text-foreground/90">{pr.title}</h1>
-              <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                <span className="inline-flex items-center gap-1.5">
-                  <GitBranch className="h-3.5 w-3.5" />
-                  {pr.baseRefName ?? "unknown"} ← {pr.headRefName ?? "unknown"}
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <FileCode className="h-3.5 w-3.5" />
-                  {pr.changedFiles} file{pr.changedFiles === 1 ? "" : "s"}
-                </span>
-                <span className="inline-flex items-center gap-1.5 text-emerald-400">
-                  <Plus className="h-3.5 w-3.5" />
-                  {pr.additions}
-                </span>
-                <span className="inline-flex items-center gap-1.5 text-rose-400">
-                  <Minus className="h-3.5 w-3.5" />
-                  {pr.deletions}
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <GitCommitHorizontal className="h-3.5 w-3.5" />
-                  {pr.commitCount} commit{pr.commitCount === 1 ? "" : "s"}
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <MessageSquare className="h-3.5 w-3.5" />
-                  {comments.length} GitHub comment{comments.length === 1 ? "" : "s"}
-                </span>
-              </div>
-            </div>
 
-            <div className="flex shrink-0 items-center gap-2">
-              {repoMachineConfigs.length > 0 ? (
-                <>
-                  <Select value={selectedMachineSlug} onValueChange={setSelectedMachineSlug}>
-                    <SelectTrigger className="w-[210px] bg-black/10 text-xs">
-                      <SelectValue placeholder="Choose machine" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {repoMachineConfigs.map((config) => (
-                        <SelectItem key={config._id} value={config.machineSlug}>
-                          {config.machineName} · {config.machineStatus}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={!selectedMachineSlug}
-                    onClick={() => void handleRefresh()}
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    Refresh PR
+              <div className="flex shrink-0 items-center gap-2">
+                {repoMachineConfigs.length > 0 ? (
+                  <>
+                    <Select value={selectedMachineSlug} onValueChange={setSelectedMachineSlug}>
+                      <SelectTrigger className="w-[210px] bg-black/10 text-xs">
+                        <SelectValue placeholder="Choose machine" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {repoMachineConfigs.map((config) => (
+                          <SelectItem key={config._id} value={config.machineSlug}>
+                            {config.machineName} · {config.machineStatus}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button variant="outline" size="sm" disabled={!selectedMachineSlug} onClick={() => void handleRefresh()}>
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Refresh PR
+                    </Button>
+                    {selectedMachineRecord?.capabilities.claude ? (
+                      <Button variant="outline" size="sm" disabled={!selectedMachineSlug} onClick={() => void handleRequestReview("claude")}>
+                        Review with Claude
+                      </Button>
+                    ) : null}
+                    {selectedMachineRecord?.capabilities.codex ? (
+                      <Button variant="outline" size="sm" disabled={!selectedMachineSlug} onClick={() => void handleRequestReview("codex")}>
+                        Review with Codex
+                      </Button>
+                    ) : null}
+                  </>
+                ) : null}
+                <a href={pr.url} target="_blank" rel="noopener noreferrer" className="shrink-0">
+                  <Button variant="outline" size="sm">
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    Open on GitHub
                   </Button>
-                  {selectedMachineRecord?.capabilities.claude ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!selectedMachineSlug}
-                      onClick={() => void handleRequestReview("claude")}
-                    >
-                      Review with Claude
-                    </Button>
-                  ) : null}
-                  {selectedMachineRecord?.capabilities.codex ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!selectedMachineSlug}
-                      onClick={() => void handleRequestReview("codex")}
-                    >
-                      Review with Codex
-                    </Button>
-                  ) : null}
-                </>
-              ) : null}
-              <a href={pr.url} target="_blank" rel="noopener noreferrer" className="shrink-0">
-                <Button variant="outline" size="sm">
-                  <ExternalLink className="h-3.5 w-3.5" />
-                  Open on GitHub
-                </Button>
-              </a>
+                </a>
+              </div>
             </div>
           </div>
-        </div>
+        </section>
+      </div>
 
-        <div className="grid gap-5 px-6 py-5 xl:grid-cols-[minmax(0,1.6fr)_minmax(280px,0.9fr)]">
-          <div className="space-y-4">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                PR Body
-              </p>
+      <div className="grid items-stretch gap-4 px-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(420px,0.95fr)]">
+        <div className="space-y-4">
+          <Card className="flex h-full flex-col overflow-hidden bg-surface">
+            <SectionHeader title="Description" pipClassName="bg-muted-foreground/40" />
+            <div className="flex-1 p-4">
               {pr.body.trim() ? (
-                <div className="mt-3 rounded-xl border border-white/8 bg-black/10 px-4 py-4">
-                  <MarkdownBody text={pr.body} />
-                </div>
+                <MarkdownBody text={pr.body} />
               ) : (
-                <p className="mt-3 text-sm text-muted-foreground">No PR description was provided.</p>
+                <p className="text-sm text-muted-foreground">No PR description was provided.</p>
               )}
             </div>
+          </Card>
 
-            <div>
+          <Card className="overflow-hidden bg-surface">
+            <SectionHeader
+              title="GitHub Comments"
+              detail={`${comments.length} total`}
+              pipClassName="bg-primary/70"
+            />
+            <div className="p-4">
               <div className="flex items-center justify-between gap-3">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  GitHub Comments
-                </p>
                 <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
                   <RefreshCw className="h-3.5 w-3.5" />
                   {selectedMachine ? `Refresh via ${selectedMachine.machineName}` : "Register a machine checkout to refresh"}
@@ -641,26 +627,26 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 </div>
               )}
             </div>
-          </div>
+          </Card>
+        </div>
 
-          <div className="space-y-4">
-            <Card className="border-white/8 bg-zinc-900/45 p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                Merge State
-              </p>
-              <div className="mt-3 flex flex-wrap gap-2">
+        <div className="space-y-4">
+          <Card className="overflow-hidden bg-surface">
+            <SectionHeader title="Merge State" pipClassName="bg-muted-foreground/40" />
+            <div className="p-4">
+              <div className="flex flex-wrap gap-2">
                 <Badge variant="outline">{pr.mergeable ?? "UNKNOWN"}</Badge>
                 <Badge variant="outline">{pr.mergeStateStatus ?? "UNKNOWN"}</Badge>
                 {pr.phase ? <Badge variant="outline">Phase: {pr.phase}</Badge> : null}
               </div>
-            </Card>
+            </div>
+          </Card>
 
-            <Card className="border-white/8 bg-zinc-900/45 p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                Changed Files
-              </p>
+          <Card className="overflow-hidden bg-surface">
+            <SectionHeader title="Files Changed" detail={`${pr.changedFiles} total`} pipClassName="bg-muted-foreground/40" />
+            <div className="p-4">
               {previewFiles.length > 0 ? (
-                <div className="mt-3 space-y-2">
+                <div className="space-y-2">
                   {previewFiles.map((file) => (
                     <div key={file.path} className="rounded-lg border border-white/8 bg-black/10 px-3 py-2">
                       <div className="truncate text-sm text-foreground/88">{file.path}</div>
@@ -672,16 +658,16 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   ))}
                 </div>
               ) : (
-                <p className="mt-3 text-sm text-muted-foreground">No file metadata was synced yet.</p>
+                <p className="text-sm text-muted-foreground">No file metadata was synced yet.</p>
               )}
-            </Card>
+            </div>
+          </Card>
 
-            <Card className="border-white/8 bg-zinc-900/45 p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                Reviews
-              </p>
+          <Card className="overflow-hidden bg-surface">
+            <SectionHeader title="Reviews" detail={reviews?.length ?? 0} pipClassName="bg-primary/60" />
+            <div className="p-4">
               {reviews && reviews.length > 0 ? (
-                <div className="mt-3 space-y-3">
+                <div className="space-y-3">
                   {reviews.map((review) => (
                     <div key={review._id} className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
                       <div className="flex flex-wrap items-center gap-2">
@@ -701,16 +687,16 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   ))}
                 </div>
               ) : (
-                <p className="mt-3 text-sm text-muted-foreground">No cloud review runs yet for this PR.</p>
+                <p className="text-sm text-muted-foreground">No cloud review runs yet for this PR.</p>
               )}
-            </Card>
+            </div>
+          </Card>
 
-            <Card className="border-white/8 bg-zinc-900/45 p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                Review Comments
-              </p>
+          <Card className="overflow-hidden bg-surface">
+            <SectionHeader title="Review Comments" detail={reviewComments?.length ?? 0} pipClassName="bg-primary/60" />
+            <div className="p-4">
               {selectedMachineRecord ? (
-                <div className="mt-3 space-y-2">
+                <div className="space-y-2">
                   {(["claude", "codex"] as const).map((reviewerId) => {
                     const pendingCount = pendingReviewCommentCounts.get(reviewerId) ?? 0;
                     const fixableCount = fixableReviewCommentCounts.get(reviewerId) ?? 0;
@@ -842,17 +828,14 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               ) : (
                 <p className="mt-3 text-sm text-muted-foreground">No review comments stored in Convex yet.</p>
               )}
-            </Card>
+            </div>
+          </Card>
 
-            <Card className="border-white/8 bg-zinc-900/45 p-4">
-              <div className="flex items-center gap-2">
-                <History className="h-4 w-4 text-muted-foreground" />
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  Timeline
-                </p>
-              </div>
+          <Card className="overflow-hidden bg-surface">
+            <SectionHeader title="Timeline" detail={timeline?.length ?? 0} pipClassName="bg-muted-foreground/40" />
+            <div className="p-4">
               {timeline && timeline.length > 0 ? (
-                <div className="mt-3 space-y-3">
+                <div className="space-y-3">
                   {timeline.slice(0, 8).map((event) => (
                     <div key={event._id} className="rounded-lg border border-white/8 bg-black/10 px-3 py-2.5">
                       <div className="flex items-center justify-between gap-3">
@@ -869,21 +852,21 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   ))}
                 </div>
               ) : (
-                <p className="mt-3 text-sm text-muted-foreground">No cloud timeline entries yet for this PR.</p>
+                <p className="text-sm text-muted-foreground">No cloud timeline entries yet for this PR.</p>
               )}
-            </Card>
+            </div>
+          </Card>
 
-            <Card className="border-amber-500/20 bg-amber-500/5 p-4">
+          <Card className="border-amber-500/20 bg-amber-500/5 p-4">
               <div className="flex items-start gap-3">
                 <AlertCircle className="mt-0.5 h-4 w-4 text-amber-300" />
                 <div className="text-sm text-amber-100/90">
                   GitHub PR detail, review requests, local comment triage, fixes, and review publishing are cloud-backed now. Reply flows are still on the remaining migration path.
                 </div>
               </div>
-            </Card>
-          </div>
+          </Card>
         </div>
-      </Card>
+      </div>
     </div>
   );
 }
