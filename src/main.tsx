@@ -32,7 +32,7 @@ function AppProviders() {
   }
 
   return (
-    <ClerkProvider publishableKey={clerkPublishableKey}>
+    <ClerkProvider publishableKey={clerkPublishableKey} afterSignOutUrl="/">
       <ConvexProviderWithClerk client={getConvexReactClient()} useAuth={useAuth}>
         {app}
       </ConvexProviderWithClerk>

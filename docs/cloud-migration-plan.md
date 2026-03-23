@@ -63,6 +63,7 @@ Each machine should eventually have:
 - Add Convex schema for users, workspaces, repos, machines, PRs, comments, and jobs.
 - Gate the UI with Clerk while preserving legacy local mode when env vars are missing.
 - Add a worker scaffold that makes the local execution plane explicit.
+- Configure Convex auth against Clerk's `CLERK_FRONTEND_API_URL`, which is the current Clerk integration guidance.
 
 ### Phase 2
 
@@ -100,7 +101,7 @@ That means:
 ## Immediate Next Steps
 
 1. Create or link a Convex deployment with `pnpm convex:dev`.
-2. Configure Clerk and set the values from `.env.example`.
+2. Configure Clerk and set the values from `.env.example`, especially `CLERK_FRONTEND_API_URL`.
 3. Generate `convex/_generated`.
 4. Replace generic Convex wrappers with generated ones.
 5. Wire the signed-in UI to `bootstrap.viewer`, `workspaces.listForCurrentUser`, and workspace repo queries.
