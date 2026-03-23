@@ -176,8 +176,10 @@ export default defineSchema({
     workspaceId: v.id("workspaces"),
     slug: v.string(),
     name: v.string(),
+    authToken: v.string(),
     hostname: v.optional(v.string()),
     platform: v.optional(v.string()),
+    version: v.optional(v.string()),
     status: v.union(v.literal("offline"), v.literal("idle"), v.literal("busy"), v.literal("error")),
     capabilities: v.object({
       git: v.boolean(),
@@ -192,7 +194,23 @@ export default defineSchema({
     updatedAt: v.string(),
   })
     .index("by_workspaceId", ["workspaceId"])
-    .index("by_workspaceId_slug", ["workspaceId", "slug"]),
+    .index("by_workspaceId_slug", ["workspaceId", "slug"])
+    .index("by_authToken", ["authToken"]),
+
+  machineEnrollmentTokens: defineTable({
+    workspaceId: v.id("workspaces"),
+    token: v.string(),
+    label: v.optional(v.string()),
+    createdByUserId: v.id("users"),
+    claimedMachineId: v.optional(v.id("machines")),
+    claimedAt: v.optional(v.string()),
+    revokedAt: v.optional(v.string()),
+    expiresAt: v.string(),
+    createdAt: v.string(),
+    updatedAt: v.string(),
+  })
+    .index("by_token", ["token"])
+    .index("by_workspaceId", ["workspaceId"]),
 
   jobs: defineTable({
     workspaceId: v.id("workspaces"),

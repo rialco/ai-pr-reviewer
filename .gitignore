@@ -12,3 +12,4 @@ data/*.db-wal
 .claude/settings.local.json
 .worktrees/
 .DS_Store
+worker/.machine-session.json

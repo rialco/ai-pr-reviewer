@@ -1,12 +1,13 @@
 import { SignInButton, UserButton } from "@clerk/react";
 import { Authenticated, AuthLoading, Unauthenticated, useMutation, useQuery } from "convex/react";
-import { Cloud, LaptopMinimalCheck, ShieldCheck, ServerCog, Users } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { Cloud, Copy, KeyRound, LaptopMinimalCheck, ShieldCheck, ShieldPlus, ServerCog, Trash2, Users } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { App } from "@/App";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { hasCloudEnv, missingCloudEnv } from "@/lib/cloud";
 import { api } from "../../convex/_generated/api";
+import { CodeBlock } from "@/components/CodeBlock";
 
 function CloudBootstrap() {
   const ensureCurrentUser = useMutation(api.bootstrap.ensureCurrentUser);
@@ -25,14 +26,46 @@ function CloudStatusCard() {
   const viewer = useQuery(api.bootstrap.viewer);
   const workspaces = useQuery(api.workspaces.listForCurrentUser);
   const activeWorkspaceId = workspaces?.[0]?._id;
+  const [copied, setCopied] = useState(false);
+  const createEnrollmentToken = useMutation(api.machines.createEnrollmentToken);
+  const revokeEnrollmentToken = useMutation(api.machines.revokeEnrollmentToken);
   const machines = useQuery(
     api.machines.listForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+  );
+  const enrollmentTokens = useQuery(
+    api.machines.listEnrollmentTokensForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
   );
 
   if (!viewer || !viewer.user) {
     return null;
   }
+
+  const latestToken = enrollmentTokens?.[0];
+  const workerSnippet = latestToken
+    ? [
+        `WORKER_WORKSPACE_ID=${activeWorkspaceId}`,
+        `WORKER_ENROLLMENT_TOKEN=${latestToken.token}`,
+        "pnpm dev:worker",
+      ].join(" \\\n  ")
+    : null;
+
+  const handleCreateToken = async () => {
+    if (!activeWorkspaceId) return;
+    await createEnrollmentToken({
+      workspaceId: activeWorkspaceId,
+      ttlMinutes: 30,
+      label: "Local worker enrollment",
+    });
+  };
+
+  const handleCopySnippet = async () => {
+    if (!workerSnippet) return;
+    await navigator.clipboard.writeText(workerSnippet);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
 
   return (
     <div className="pointer-events-none absolute left-3 top-3 z-50 max-w-sm">
@@ -75,9 +108,74 @@ function CloudStatusCard() {
             </div>
           </div>
           <p className="text-xs leading-5">
-            Convex is linked and Clerk-authenticated. The next slice is machine enrollment and job
-            claiming against this workspace.
+            Convex is linked and Clerk-authenticated. Use a one-time enrollment token to attach a
+            machine, then the worker will persist its machine credential locally and heartbeat back
+            to this workspace.
           </p>
+          <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">
+                  <ShieldPlus className="h-3.5 w-3.5" />
+                  Machine Enrollment
+                </p>
+                <p className="mt-1 text-xs leading-5">
+                  Mint a 30-minute token for a local worker. The token is one-time use and becomes
+                  a persistent machine credential after registration.
+                </p>
+              </div>
+              <Button size="sm" onClick={() => void handleCreateToken()} disabled={!activeWorkspaceId}>
+                <KeyRound className="h-3.5 w-3.5" />
+                Token
+              </Button>
+            </div>
+            {latestToken ? (
+              <div className="space-y-2">
+                <div className="rounded-md border border-border/70 bg-card/80 px-3 py-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">
+                    Active Token
+                  </p>
+                  <p className="mt-1 break-all font-mono text-xs text-primary">{latestToken.token}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Expires at {new Date(latestToken.expiresAt).toLocaleString()}
+                  </p>
+                </div>
+                {workerSnippet ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">
+                        Worker Command
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" variant="ghost" onClick={() => void handleCopySnippet()}>
+                          <Copy className="h-3.5 w-3.5" />
+                          {copied ? "Copied" : "Copy"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            void revokeEnrollmentToken({
+                              workspaceId: activeWorkspaceId!,
+                              tokenId: latestToken._id,
+                            })
+                          }
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Revoke
+                        </Button>
+                      </div>
+                    </div>
+                    <CodeBlock code={workerSnippet} lang="bash" />
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <p className="text-xs leading-5 text-muted-foreground">
+                No active enrollment token yet. Create one when you are ready to attach a worker.
+              </p>
+            )}
+          </div>
         </CardContent>
       </Card>
     </div>
