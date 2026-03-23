@@ -15,6 +15,7 @@ import type * as lib_machineAuth from "../lib/machineAuth.js";
 import type * as machines from "../machines.js";
 import type * as prs from "../prs.js";
 import type * as repos from "../repos.js";
+import type * as reviews from "../reviews.js";
 import type * as workspaces from "../workspaces.js";
 
 import type {
@@ -31,6 +32,7 @@ declare const fullApi: ApiFromModules<{
   machines: typeof machines;
   prs: typeof prs;
   repos: typeof repos;
+  reviews: typeof reviews;
   workspaces: typeof workspaces;
 }>;
 

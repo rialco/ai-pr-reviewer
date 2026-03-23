@@ -365,6 +365,88 @@ export const enqueuePrRefresh = mutation({
   },
 });
 
+export const enqueueReviewRequest = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    repoLabel: v.string(),
+    prNumber: v.number(),
+    machineSlug: v.string(),
+    reviewerId: v.union(v.literal("claude"), v.literal("codex")),
+  },
+  handler: async (ctx, args) => {
+    const { user } = await requireWorkspaceAccess(ctx, args.workspaceId);
+    const repo = await ctx.db
+      .query("repos")
+      .withIndex("by_workspaceId_label", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("label", args.repoLabel),
+      )
+      .unique();
+
+    if (!repo || repo.archivedAt) {
+      throw new Error("Repo not found.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const machineConfig = await ctx.db
+      .query("repoMachineConfigs")
+      .withIndex("by_repoId_machineSlug", (q) =>
+        q.eq("repoId", repo._id).eq("machineSlug", args.machineSlug),
+      )
+      .unique();
+
+    if (!machineConfig) {
+      throw new Error("No checkout is registered for this repo on that machine.");
+    }
+
+    const now = nowIso();
+    const jobId = await ctx.db.insert("jobs", {
+      workspaceId: args.workspaceId,
+      repoId: repo._id,
+      prId: pr._id,
+      createdByUserId: user._id,
+      kind: "request_review",
+      status: "queued",
+      targetMachineSlug: args.machineSlug,
+      title: `Review ${repo.label} #${pr.prNumber} with ${args.reviewerId}`,
+      payload: {
+        repoId: repo._id,
+        prId: pr._id,
+        repoLabel: repo.label,
+        owner: repo.owner,
+        repo: repo.repo,
+        prNumber: pr.prNumber,
+        prTitle: pr.title,
+        branch: pr.headRefName,
+        localPath: machineConfig.localPath,
+        reviewerId: args.reviewerId,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("timelineEvents", {
+      workspaceId: args.workspaceId,
+      prId: pr._id,
+      eventType: "review_requested",
+      detail: {
+        reviewerId: args.reviewerId,
+        machineSlug: args.machineSlug,
+      },
+      createdAt: now,
+    });
+
+    return await ctx.db.get(jobId);
+  },
+});
+
 export const enqueueMachineSelfCheck = mutation({
   args: {
     workspaceId: v.id("workspaces"),
@@ -648,6 +730,25 @@ export const failMachineJob = mutation({
         prId: job.prId,
         eventType: "refresh_failed",
         detail: {
+          machineSlug: machine.slug,
+          jobId: job._id,
+          errorMessage: args.errorMessage,
+        },
+        createdAt: now,
+      });
+    }
+
+    if (job.kind === "request_review" && job.prId) {
+      const payload =
+        job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
+          ? (job.payload as Record<string, unknown>)
+          : null;
+      await ctx.db.insert("timelineEvents", {
+        workspaceId: job.workspaceId,
+        prId: job.prId,
+        eventType: "review_failed",
+        detail: {
+          reviewerId: typeof payload?.reviewerId === "string" ? payload.reviewerId : null,
           machineSlug: machine.slug,
           jobId: job._id,
           errorMessage: args.errorMessage,

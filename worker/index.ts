@@ -1,15 +1,22 @@
 import fs from "fs";
 import os from "os";
-import { execFileSync } from "child_process";
+import path from "path";
+import { execFileSync, exec, spawn } from "child_process";
+import { promisify } from "util";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
+import { buildReviewPrompt, parseReviewOutput } from "../server/infrastructure/reviewers/reviewPrompt";
+import { getPRDiff } from "../server/services/github";
+import { fetchOrigin } from "../server/services/git";
 import {
   loadWorkerConfig,
   readWorkerSession,
   writeWorkerSession,
   type WorkerSession,
 } from "./config";
+
+const execAsync = promisify(exec);
 
 function detectCapabilities() {
   const hasBinary = (binary: string) => {
@@ -107,6 +114,151 @@ interface SyncSnapshotComment {
 
 function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+async function prepareReviewWorktree(localPath: string, branch: string, prefix: string) {
+  await fetchOrigin(localPath);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  await execAsync(`git worktree add ${JSON.stringify(tmpDir)} origin/${branch}`, {
+    cwd: localPath,
+    timeout: 60000,
+  });
+
+  return {
+    cwd: tmpDir,
+    cleanup: async () => {
+      await execAsync(`git worktree remove ${JSON.stringify(tmpDir)} --force`, {
+        cwd: localPath,
+      });
+    },
+  };
+}
+
+function runClaudeReview(cwd: string, prompt: string, onOutput?: (line: string) => void): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "claude",
+      ["-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence"],
+      { cwd, stdio: ["pipe", "pipe", "pipe"] },
+    );
+
+    let buffer = "";
+    let lastResult = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop()!;
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line) as Record<string, unknown>;
+          if (event.type === "result" && typeof event.result === "string") {
+            lastResult = event.result;
+          }
+          if (event.type === "content_block_start") {
+            const block = event.content_block as Record<string, unknown> | undefined;
+            if (
+              block?.type === "text" &&
+              typeof block.text === "string" &&
+              block.text.trim().length > 0 &&
+              block.text.length <= 200
+            ) {
+              onOutput?.(block.text.trim());
+            }
+          }
+        } catch {
+          onOutput?.(line.trim());
+        }
+      }
+    });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("Claude review timed out after 10 minutes"));
+    }, 600000);
+
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer) as Record<string, unknown>;
+          if (event.type === "result" && typeof event.result === "string") {
+            lastResult = event.result;
+          }
+        } catch {}
+      }
+      if (code !== 0) {
+        reject(new Error(`Claude exited with code ${code}: ${stderr}`));
+      } else if (lastResult) {
+        resolve(lastResult);
+      } else {
+        reject(new Error(`No result from Claude. stderr: ${stderr.slice(0, 500)}`));
+      }
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+
+    child.stdin.write(prompt);
+    child.stdin.end();
+  });
+}
+
+function runCodexReview(cwd: string, prompt: string, onOutput?: (line: string) => void): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("codex", ["exec", "--full-auto", prompt], {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      for (const line of text.split("\n")) {
+        if (line.trim()) onOutput?.(line.trim());
+      }
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("Codex review timed out after 20 minutes"));
+    }, 20 * 60 * 1000);
+
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0 && !stdout.trim()) {
+        const cleanStderr = stderr.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "").trim();
+        const errorLine = cleanStderr
+          .split("\n")
+          .filter((line) => line.trim())
+          .find((line) => /error/i.test(line));
+        reject(new Error(errorLine?.replace(/^ERROR:\s*/i, "").trim() || cleanStderr || "Codex failed"));
+        return;
+      }
+      resolve(stdout);
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
 }
 
 async function syncSinglePrSnapshot(params: {
@@ -469,6 +621,137 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
         },
       ],
     };
+  }
+
+  if (job.kind === "request_review") {
+    const repoId = typeof payload?.repoId === "string" ? (payload.repoId as Id<"repos">) : null;
+    const repoLabel = typeof payload?.repoLabel === "string" ? payload.repoLabel : null;
+    const prNumber = typeof payload?.prNumber === "number" ? payload.prNumber : null;
+    const prTitle = typeof payload?.prTitle === "string" ? payload.prTitle : null;
+    const branch = typeof payload?.branch === "string" ? payload.branch : null;
+    const localPath = typeof payload?.localPath === "string" ? payload.localPath : null;
+    const reviewerId =
+      payload?.reviewerId === "claude" || payload?.reviewerId === "codex"
+        ? payload.reviewerId
+        : null;
+
+    if (!repoId || !repoLabel || !prNumber || !prTitle || !branch || !localPath || !reviewerId) {
+      throw new Error("request_review payload is missing repoId, repoLabel, prNumber, prTitle, branch, localPath, or reviewerId.");
+    }
+
+    const capabilities = detectCapabilities();
+    if (reviewerId === "claude" && !capabilities.claude) {
+      throw new Error("Claude CLI is not available on this machine.");
+    }
+    if (reviewerId === "codex" && !capabilities.codex) {
+      throw new Error("Codex CLI is not available on this machine.");
+    }
+
+    const prDiff = await getPRDiff(repoLabel, prNumber, localPath, branch);
+    if (!prDiff) {
+      throw new Error(`Could not fetch PR diff for ${repoLabel} #${prNumber}`);
+    }
+
+    let reviewCwd = localPath;
+    let cleanupWorktree: (() => Promise<void>) | undefined;
+    try {
+      try {
+        const worktree = await prepareReviewWorktree(
+          localPath,
+          branch,
+          reviewerId === "claude" ? "pr-review-claude-" : "pr-review-codex-",
+        );
+        reviewCwd = worktree.cwd;
+        cleanupWorktree = worktree.cleanup;
+      } catch {
+        reviewCwd = localPath;
+      }
+
+      const prompt = buildReviewPrompt(
+        {
+          repo: repoLabel,
+          prNumber,
+          prTitle,
+          branch,
+          localPath,
+        },
+        prDiff.length > 30000 ? `${prDiff.slice(0, 30000)}\n... (diff truncated)` : prDiff,
+        reviewCwd !== localPath,
+        [],
+      );
+
+      const outputLines: string[] = [];
+      const rawOutput =
+        reviewerId === "claude"
+          ? await runClaudeReview(reviewCwd, prompt, (line) => outputLines.push(`[claude] ${line}`))
+          : await runCodexReview(reviewCwd, prompt, (line) => outputLines.push(`[codex] ${line}`));
+      const parsed = parseReviewOutput(rawOutput);
+
+      await client.mutation(api.reviews.upsertReviewResult, {
+        machineToken: session.machineToken,
+        repoId,
+        prNumber,
+        reviewerId,
+        source: "local",
+        confidenceScore: parsed.confidenceScore,
+        summary: parsed.summary,
+        rawOutput,
+        comments: parsed.comments.map((comment) => ({
+          path: comment.path,
+          line: comment.line,
+          body: comment.body,
+          suggestion: comment.suggestion,
+          severity: comment.severity,
+          confidence: comment.confidence ?? undefined,
+          evidence: comment.evidence
+            ? {
+                filesRead: comment.evidence.filesRead,
+                changedLinesChecked: comment.evidence.changedLinesChecked,
+                ruleReferences: comment.evidence.ruleReferences,
+                riskSummary: comment.evidence.riskSummary,
+              }
+            : undefined,
+        })),
+      });
+
+      return {
+        output: [
+          `[request_review] completed at ${now}`,
+          `[request_review] repo=${repoLabel}`,
+          `[request_review] pr=${prNumber}`,
+          `[request_review] reviewer=${reviewerId}`,
+          `[request_review] confidence=${parsed.confidenceScore}`,
+          `[request_review] comments=${parsed.comments.length}`,
+          ...outputLines.slice(-12),
+        ],
+        steps: [
+          {
+            step: "fetch_pr_diff",
+            detail: `${repoLabel} #${prNumber}`,
+            status: "done" as const,
+            ts: now,
+          },
+          {
+            step: "run_reviewer",
+            detail: reviewerId,
+            status: "done" as const,
+            ts: now,
+          },
+          {
+            step: "persist_review",
+            detail: `Stored ${parsed.comments.length} comment(s) in Convex`,
+            status: "done" as const,
+            ts: now,
+          },
+        ],
+      };
+    } finally {
+      if (cleanupWorktree) {
+        try {
+          await cleanupWorktree();
+        } catch {}
+      }
+    }
   }
 
   throw new Error(`Unsupported job kind: ${job.kind}`);
