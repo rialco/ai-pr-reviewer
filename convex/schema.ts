@@ -196,6 +196,9 @@ export default defineSchema({
     suggestion: v.optional(v.string()),
     publishedAt: v.optional(v.string()),
     supersededAt: v.optional(v.string()),
+    fixCommitHash: v.optional(v.string()),
+    fixFilesChanged: v.optional(v.array(v.string())),
+    fixFixedAt: v.optional(v.string()),
     createdAt: v.string(),
     updatedAt: v.string(),
   })

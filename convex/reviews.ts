@@ -142,6 +142,47 @@ export const listCommentsForMachine = query({
   },
 });
 
+export const listFixableCommentsForMachine = query({
+  args: {
+    machineToken: v.string(),
+    repoId: v.id("repos"),
+    prNumber: v.number(),
+    reviewerId: v.union(v.literal("claude"), v.literal("codex")),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const repo = await ctx.db.get(args.repoId);
+
+    if (!repo || repo.workspaceId !== machine.workspaceId || repo.archivedAt) {
+      throw new Error("Repo not found for this machine workspace.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const comments = await ctx.db
+      .query("reviewComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+
+    return comments
+      .filter(
+        (comment) =>
+          comment.reviewerId === args.reviewerId &&
+          !comment.supersededAt &&
+          comment.status === "fixing" &&
+          (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX"),
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  },
+});
+
 export const upsertReviewResult = mutation({
   args: {
     machineToken: v.string(),
@@ -230,6 +271,9 @@ export const upsertReviewResult = mutation({
         suggestion: comment.suggestion,
         publishedAt: undefined,
         supersededAt: undefined,
+        fixCommitHash: undefined,
+        fixFilesChanged: undefined,
+        fixFixedAt: undefined,
         createdAt: now,
         updatedAt: now,
       });
@@ -357,5 +401,112 @@ export const applyReviewCommentAnalysisResults = mutation({
     });
 
     return { ok: true, analyzed: args.results.length };
+  },
+});
+
+export const finalizeReviewCommentFixResults = mutation({
+  args: {
+    machineToken: v.string(),
+    repoId: v.id("repos"),
+    prNumber: v.number(),
+    reviewerId: v.union(v.literal("claude"), v.literal("codex")),
+    fixerAgent: v.union(v.literal("claude"), v.literal("codex")),
+    results: v.array(
+      v.object({
+        commentId: v.id("reviewComments"),
+        filesChanged: v.array(v.string()),
+        commitHash: v.string(),
+        commitMessage: v.string(),
+        fixedAt: v.string(),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const repo = await ctx.db.get(args.repoId);
+
+    if (!repo || repo.workspaceId !== machine.workspaceId || repo.archivedAt) {
+      throw new Error("Repo not found for this machine workspace.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const comments = await ctx.db
+      .query("reviewComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+    const activeFixingComments = comments.filter(
+      (comment) =>
+        comment.reviewerId === args.reviewerId &&
+        !comment.supersededAt &&
+        comment.status === "fixing",
+    );
+
+    if (args.results.length === 0) {
+      const now = nowIso();
+      for (const comment of activeFixingComments) {
+        await ctx.db.patch(comment._id, {
+          status: "analyzed",
+          updatedAt: now,
+        });
+      }
+
+      await ctx.db.insert("timelineEvents", {
+        workspaceId: machine.workspaceId,
+        prId: pr._id,
+        eventType: "local_fix_no_changes",
+        detail: {
+          reviewerId: args.reviewerId,
+          fixerAgent: args.fixerAgent,
+          machineSlug: machine.slug,
+          commentCount: activeFixingComments.length,
+        },
+        createdAt: now,
+      });
+
+      return { ok: true, fixed: 0 };
+    }
+
+    const primaryResult = args.results[0];
+    for (const comment of activeFixingComments) {
+      await ctx.db.patch(comment._id, {
+        status: "fixed",
+        fixCommitHash: primaryResult.commitHash,
+        fixFilesChanged: primaryResult.filesChanged,
+        fixFixedAt: primaryResult.fixedAt,
+        updatedAt: primaryResult.fixedAt,
+      });
+    }
+
+    await ctx.db.insert("timelineEvents", {
+      workspaceId: machine.workspaceId,
+      prId: pr._id,
+      eventType: "local_fix_completed",
+      detail: {
+        reviewerId: args.reviewerId,
+        fixerAgent: args.fixerAgent,
+        machineSlug: machine.slug,
+        commentCount: activeFixingComments.length,
+        commitHash: primaryResult.commitHash,
+        filesChanged: primaryResult.filesChanged,
+      },
+      createdAt: primaryResult.fixedAt,
+    });
+
+    await ctx.db.patch(pr._id, {
+      phase: "fixed",
+      lastFixedAt: primaryResult.fixedAt,
+      updatedAt: primaryResult.fixedAt,
+      reviewCycle: (pr.reviewCycle ?? 0) + 1,
+    });
+
+    return { ok: true, fixed: activeFixingComments.length };
   },
 });

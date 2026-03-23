@@ -31,6 +31,10 @@ function timelineLabel(eventType: string) {
   if (eventType === "comments_fetched") return "GitHub snapshot updated";
   if (eventType === "analysis_requested") return "Review comment analysis requested";
   if (eventType === "analysis_failed") return "Review comment analysis failed";
+  if (eventType === "local_fix_started") return "Local fix requested";
+  if (eventType === "local_fix_completed") return "Local fix completed";
+  if (eventType === "local_fix_failed") return "Local fix failed";
+  if (eventType === "local_fix_no_changes") return "Local fix made no changes";
   return eventType.replaceAll("_", " ");
 }
 
@@ -39,6 +43,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const enqueuePrRefresh = useMutation(api.jobs.enqueuePrRefresh);
   const enqueueReviewRequest = useMutation(api.jobs.enqueueReviewRequest);
   const enqueueReviewCommentAnalysis = useMutation(api.jobs.enqueueReviewCommentAnalysis);
+  const enqueueReviewCommentFix = useMutation(api.jobs.enqueueReviewCommentFix);
   const detail = useQuery(
     api.prs.getDetailForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
@@ -67,6 +72,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [fixError, setFixError] = useState<string | null>(null);
 
   const repoMachineConfigs = useMemo(
     () => (machineConfigs ?? []).filter((config) => config.repoLabel === repo),
@@ -89,6 +95,22 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     const counts = new Map<string, number>();
     for (const comment of reviewComments ?? []) {
       if (comment.status !== "new" && comment.status !== "analyzing") {
+        continue;
+      }
+      counts.set(comment.reviewerId, (counts.get(comment.reviewerId) ?? 0) + 1);
+    }
+    return counts;
+  }, [reviewComments]);
+  const fixableReviewCommentCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const comment of reviewComments ?? []) {
+      if (
+        comment.analysisCategory !== "MUST_FIX" &&
+        comment.analysisCategory !== "SHOULD_FIX"
+      ) {
+        continue;
+      }
+      if (comment.status !== "analyzed" && comment.status !== "fix_failed") {
         continue;
       }
       counts.set(comment.reviewerId, (counts.get(comment.reviewerId) ?? 0) + 1);
@@ -175,6 +197,29 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       });
     } catch (error) {
       setAnalysisError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleFixReviewComments = async (
+    reviewerId: "claude" | "codex",
+    fixerAgent: "claude" | "codex",
+  ) => {
+    if (!activeWorkspaceId || !selectedMachineSlug) {
+      return;
+    }
+
+    try {
+      setFixError(null);
+      await enqueueReviewCommentFix({
+        workspaceId: activeWorkspaceId,
+        repoLabel: repo,
+        prNumber,
+        machineSlug: selectedMachineSlug,
+        reviewerId,
+        fixerAgent,
+      });
+    } catch (error) {
+      setFixError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -314,6 +359,11 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   {analysisError}
                 </div>
               ) : null}
+              {fixError ? (
+                <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {fixError}
+                </div>
+              ) : null}
 
               {comments.length === 0 ? (
                 <div className="mt-3 rounded-xl border border-dashed border-white/10 px-4 py-6 text-sm text-muted-foreground">
@@ -406,17 +456,27 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 Review Comments
               </p>
               {selectedMachineRecord ? (
-                <div className="mt-3 flex flex-wrap gap-2">
+                <div className="mt-3 space-y-2">
                   {(["claude", "codex"] as const).map((reviewerId) => {
                     const pendingCount = pendingReviewCommentCounts.get(reviewerId) ?? 0;
-                    if (pendingCount === 0) return null;
+                    const fixableCount = fixableReviewCommentCounts.get(reviewerId) ?? 0;
+                    if (pendingCount === 0 && fixableCount === 0) return null;
 
                     return (
-                      <div key={`${reviewerId}-analysis-actions`} className="flex flex-wrap items-center gap-2 rounded-lg border border-white/8 bg-black/10 px-3 py-2">
+                      <div
+                        key={`${reviewerId}-actions`}
+                        className="flex flex-wrap items-center gap-2 rounded-lg border border-white/8 bg-black/10 px-3 py-2"
+                      >
                         <span className="text-xs text-muted-foreground">
-                          {reviewerId} has {pendingCount} pending comment{pendingCount === 1 ? "" : "s"}
+                          {reviewerId}
+                          {pendingCount > 0
+                            ? ` · ${pendingCount} pending triage`
+                            : ""}
+                          {fixableCount > 0
+                            ? `${pendingCount > 0 ? " · " : " · "}${fixableCount} ready to fix`
+                            : ""}
                         </span>
-                        {selectedMachineRecord.capabilities.claude ? (
+                        {pendingCount > 0 && selectedMachineRecord.capabilities.claude ? (
                           <Button
                             variant="outline"
                             size="sm"
@@ -425,13 +485,31 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                             Triage with Claude
                           </Button>
                         ) : null}
-                        {selectedMachineRecord.capabilities.codex ? (
+                        {pendingCount > 0 && selectedMachineRecord.capabilities.codex ? (
                           <Button
                             variant="outline"
                             size="sm"
                             onClick={() => void handleAnalyzeReviewComments(reviewerId, "codex")}
                           >
                             Triage with Codex
+                          </Button>
+                        ) : null}
+                        {fixableCount > 0 && selectedMachineRecord.capabilities.claude ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handleFixReviewComments(reviewerId, "claude")}
+                          >
+                            Fix with Claude
+                          </Button>
+                        ) : null}
+                        {fixableCount > 0 && selectedMachineRecord.capabilities.codex ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handleFixReviewComments(reviewerId, "codex")}
+                          >
+                            Fix with Codex
                           </Button>
                         ) : null}
                       </div>
@@ -462,6 +540,23 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                           <p className="mt-2 whitespace-pre-wrap text-sm leading-6">
                             {comment.analysisReasoning}
                           </p>
+                        </div>
+                      ) : null}
+                      {comment.fixCommitHash ? (
+                        <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
+                            Fix Result
+                          </p>
+                          <p className="mt-2 text-sm leading-6">
+                            Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
+                            {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
+                          </p>
+                          {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
+                            <p className="mt-1 text-xs text-sky-100/80">
+                              {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
+                              {comment.fixFilesChanged.length > 4 ? "..." : ""}
+                            </p>
+                          ) : null}
                         </div>
                       ) : null}
                     </div>
@@ -505,7 +600,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               <div className="flex items-start gap-3">
                 <AlertCircle className="mt-0.5 h-4 w-4 text-amber-300" />
                 <div className="text-sm text-amber-100/90">
-                  GitHub PR detail, review requests, review comments, and comment triage are cloud-backed now. Fixes, replies, and publish flows are still on the remaining migration path.
+                  GitHub PR detail, review requests, review comment triage, and local comment fixes are cloud-backed now. Replies and publish flows are still on the remaining migration path.
                 </div>
               </div>
             </Card>

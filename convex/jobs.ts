@@ -563,6 +563,118 @@ export const enqueueReviewCommentAnalysis = mutation({
   },
 });
 
+export const enqueueReviewCommentFix = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    repoLabel: v.string(),
+    prNumber: v.number(),
+    machineSlug: v.string(),
+    reviewerId: v.union(v.literal("claude"), v.literal("codex")),
+    fixerAgent: v.union(v.literal("claude"), v.literal("codex")),
+  },
+  handler: async (ctx, args) => {
+    const { user } = await requireWorkspaceAccess(ctx, args.workspaceId);
+    const repo = await ctx.db
+      .query("repos")
+      .withIndex("by_workspaceId_label", (q) =>
+        q.eq("workspaceId", args.workspaceId).eq("label", args.repoLabel),
+      )
+      .unique();
+
+    if (!repo || repo.archivedAt) {
+      throw new Error("Repo not found.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const machineConfig = await ctx.db
+      .query("repoMachineConfigs")
+      .withIndex("by_repoId_machineSlug", (q) =>
+        q.eq("repoId", repo._id).eq("machineSlug", args.machineSlug),
+      )
+      .unique();
+
+    if (!machineConfig) {
+      throw new Error("No checkout is registered for this repo on that machine.");
+    }
+
+    const now = nowIso();
+    const reviewComments = await ctx.db
+      .query("reviewComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+    const fixableComments = reviewComments.filter(
+      (comment) =>
+        comment.reviewerId === args.reviewerId &&
+        !comment.supersededAt &&
+        (comment.status === "analyzed" || comment.status === "fix_failed") &&
+        (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX"),
+    );
+
+    if (fixableComments.length === 0) {
+      throw new Error("No actionable triaged review comments are available to fix.");
+    }
+
+    for (const comment of fixableComments) {
+      await ctx.db.patch(comment._id, {
+        status: "fixing",
+        updatedAt: now,
+      });
+    }
+
+    const jobId = await ctx.db.insert("jobs", {
+      workspaceId: args.workspaceId,
+      repoId: repo._id,
+      prId: pr._id,
+      createdByUserId: user._id,
+      kind: "fix_comments",
+      status: "queued",
+      targetMachineSlug: args.machineSlug,
+      title: `Fix ${repo.label} #${pr.prNumber} review comments with ${args.fixerAgent}`,
+      payload: {
+        source: "local_review_comments",
+        repoId: repo._id,
+        prId: pr._id,
+        repoLabel: repo.label,
+        owner: repo.owner,
+        repo: repo.repo,
+        prNumber: pr.prNumber,
+        prTitle: pr.title,
+        branch: pr.headRefName,
+        localPath: machineConfig.localPath,
+        skipTypecheck: machineConfig.skipTypecheck,
+        reviewerId: args.reviewerId,
+        fixerAgent: args.fixerAgent,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("timelineEvents", {
+      workspaceId: args.workspaceId,
+      prId: pr._id,
+      eventType: "local_fix_started",
+      detail: {
+        reviewerId: args.reviewerId,
+        fixerAgent: args.fixerAgent,
+        machineSlug: args.machineSlug,
+        commentCount: fixableComments.length,
+        source: "local_review_comments",
+      },
+      createdAt: now,
+    });
+
+    return await ctx.db.get(jobId);
+  },
+});
+
 export const enqueueMachineSelfCheck = mutation({
   args: {
     workspaceId: v.id("workspaces"),
@@ -907,6 +1019,49 @@ export const failMachineJob = mutation({
         detail: {
           reviewerId: typeof payload?.reviewerId === "string" ? payload.reviewerId : null,
           analyzerAgent: typeof payload?.analyzerAgent === "string" ? payload.analyzerAgent : null,
+          source: typeof payload?.source === "string" ? payload.source : null,
+          machineSlug: machine.slug,
+          jobId: job._id,
+          errorMessage: args.errorMessage,
+        },
+        createdAt: now,
+      });
+    }
+
+    if (job.kind === "fix_comments" && job.prId) {
+      const payload =
+        job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
+          ? (job.payload as Record<string, unknown>)
+          : null;
+      if (
+        typeof payload?.source === "string" &&
+        payload.source === "local_review_comments" &&
+        typeof payload.reviewerId === "string"
+      ) {
+        const reviewComments = await ctx.db
+          .query("reviewComments")
+          .withIndex("by_prId", (q) => q.eq("prId", job.prId!))
+          .collect();
+        for (const comment of reviewComments) {
+          if (
+            comment.reviewerId === payload.reviewerId &&
+            !comment.supersededAt &&
+            comment.status === "fixing"
+          ) {
+            await ctx.db.patch(comment._id, {
+              status: "fix_failed",
+              updatedAt: now,
+            });
+          }
+        }
+      }
+      await ctx.db.insert("timelineEvents", {
+        workspaceId: job.workspaceId,
+        prId: job.prId,
+        eventType: "local_fix_failed",
+        detail: {
+          reviewerId: typeof payload?.reviewerId === "string" ? payload.reviewerId : null,
+          fixerAgent: typeof payload?.fixerAgent === "string" ? payload.fixerAgent : null,
           source: typeof payload?.source === "string" ? payload.source : null,
           machineSlug: machine.slug,
           jobId: job._id,

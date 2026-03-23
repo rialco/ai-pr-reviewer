@@ -8,9 +8,10 @@ import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 import { buildReviewPrompt, parseReviewOutput } from "../server/infrastructure/reviewers/reviewPrompt";
 import { analyzeComments, type AnalysisProgressEvent, type AnalyzerAgent } from "../server/services/analyzer";
+import { fixComments, type FixerAgent } from "../server/services/fixer";
 import { getPRDiff } from "../server/services/github";
 import { fetchOrigin } from "../server/services/git";
-import type { BotComment, RepoConfig } from "../server/types";
+import type { BotComment, CommentState, RepoConfig } from "../server/types";
 import {
   loadWorkerConfig,
   readWorkerSession,
@@ -924,6 +925,219 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
         {
           step: "persist_review_analysis",
           detail: `Stored ${analysisResults.length} triaged review comment(s) in Convex`,
+          status: "done" as const,
+          ts: now,
+        },
+      ],
+    };
+  }
+
+  if (job.kind === "fix_comments") {
+    const source = typeof payload?.source === "string" ? payload.source : null;
+    const repoId = typeof payload?.repoId === "string" ? (payload.repoId as Id<"repos">) : null;
+    const repoLabel = typeof payload?.repoLabel === "string" ? payload.repoLabel : null;
+    const owner = typeof payload?.owner === "string" ? payload.owner : null;
+    const repoName = typeof payload?.repo === "string" ? payload.repo : null;
+    const prNumber = typeof payload?.prNumber === "number" ? payload.prNumber : null;
+    const prTitle = typeof payload?.prTitle === "string" ? payload.prTitle : null;
+    const branch = typeof payload?.branch === "string" ? payload.branch : null;
+    const localPath = typeof payload?.localPath === "string" ? payload.localPath : null;
+    const skipTypecheck = typeof payload?.skipTypecheck === "boolean" ? payload.skipTypecheck : false;
+    const reviewerId =
+      payload?.reviewerId === "claude" || payload?.reviewerId === "codex"
+        ? payload.reviewerId
+        : null;
+    const fixerAgent =
+      payload?.fixerAgent === "claude" || payload?.fixerAgent === "codex"
+        ? (payload.fixerAgent as FixerAgent)
+        : null;
+
+    if (
+      source !== "local_review_comments" ||
+      !repoId ||
+      !repoLabel ||
+      !owner ||
+      !repoName ||
+      !prNumber ||
+      !prTitle ||
+      !branch ||
+      !localPath ||
+      !reviewerId ||
+      !fixerAgent
+    ) {
+      throw new Error("fix_comments payload is missing repo or review fix context.");
+    }
+
+    const capabilities = detectCapabilities();
+    if (fixerAgent === "claude" && !capabilities.claude) {
+      throw new Error("Claude CLI is not available on this machine.");
+    }
+    if (fixerAgent === "codex" && !capabilities.codex) {
+      throw new Error("Codex CLI is not available on this machine.");
+    }
+
+    const fixableComments = await client.query(api.reviews.listFixableCommentsForMachine, {
+      machineToken: session.machineToken,
+      repoId,
+      prNumber,
+      reviewerId,
+    });
+
+    if (fixableComments.length === 0) {
+      await client.mutation(api.reviews.finalizeReviewCommentFixResults, {
+        machineToken: session.machineToken,
+        repoId,
+        prNumber,
+        reviewerId,
+        fixerAgent,
+        results: [],
+      });
+
+      return {
+        output: [
+          `[fix_comments] completed at ${now}`,
+          `[fix_comments] repo=${repoLabel}`,
+          `[fix_comments] reviewer=${reviewerId}`,
+          `[fix_comments] fixer=${fixerAgent}`,
+          "[fix_comments] no actionable review comments found",
+        ],
+        steps: [
+          {
+            step: "load_fixable_comments",
+            detail: "No actionable review comments to fix",
+            status: "done" as const,
+            ts: now,
+          },
+        ],
+      };
+    }
+
+    const commentIdMap = new Map<number, Id<"reviewComments">>();
+    const botComments: BotComment[] = fixableComments.map((comment, index) => {
+      const syntheticId = index + 1;
+      commentIdMap.set(syntheticId, comment._id);
+      return {
+        id: syntheticId,
+        prNumber,
+        prTitle,
+        prUrl: `https://github.com/${repoLabel}/pull/${prNumber}`,
+        repo: repoLabel,
+        path: comment.path,
+        line: comment.line,
+        diffHunk: null,
+        body: comment.suggestion
+          ? `${comment.body}\n\nSuggested fix:\n\`\`\`\n${comment.suggestion}\n\`\`\``
+          : comment.body,
+        user: comment.reviewerId,
+        createdAt: comment.createdAt,
+        url: null,
+        type: "inline",
+      };
+    });
+    const commentStates: CommentState[] = fixableComments.map((comment, index) => {
+      const syntheticId = index + 1;
+      return {
+        commentId: syntheticId,
+        repo: repoLabel,
+        prNumber,
+        status: "analyzed",
+        analysis: {
+          commentId: syntheticId,
+          category:
+            (comment.analysisCategory as NonNullable<CommentState["analysis"]>["category"]) ??
+            "SHOULD_FIX",
+          reasoning: comment.analysisReasoning ?? comment.body,
+          verdict: comment.analysisDetails?.verdict,
+          severity: comment.analysisDetails?.severity ?? null,
+          confidence: comment.analysisDetails?.confidence ?? null,
+          accessMode: comment.analysisDetails?.accessMode,
+          evidence: comment.analysisDetails?.evidence ?? null,
+        },
+        seenAt: comment.createdAt,
+      };
+    });
+    const repoConfig: RepoConfig = {
+      owner,
+      repo: repoName,
+      label: repoLabel,
+      botUsers: [],
+      localPath,
+      skipTypecheck,
+    };
+    const progressOutput: string[] = [];
+    const results = await fixComments({
+      fixerAgent,
+      repo: repoConfig,
+      branch,
+      prNumber,
+      prTitle,
+      comments: botComments,
+      commentStates,
+      onDebug: (debugDetail) => {
+        progressOutput.push(`[debug] ${JSON.stringify(debugDetail)}`);
+      },
+      onHistoryUpdate: (history) => {
+        if (history.currentStep) {
+          progressOutput.push(`[history] ${history.currentStep}${history.detail ? ` · ${history.detail}` : ""}`);
+        } else if (history.detail) {
+          progressOutput.push(`[history] ${history.detail}`);
+        }
+        const lastLine = history.output[history.output.length - 1];
+        if (lastLine) {
+          progressOutput.push(lastLine);
+        }
+      },
+    });
+
+    await client.mutation(api.reviews.finalizeReviewCommentFixResults, {
+      machineToken: session.machineToken,
+      repoId,
+      prNumber,
+      reviewerId,
+      fixerAgent,
+      results: results
+        .map((result) => {
+          const commentId = commentIdMap.get(result.commentId);
+          if (!commentId) {
+            return null;
+          }
+
+          return {
+            commentId,
+            filesChanged: result.filesChanged,
+            commitHash: result.commitHash,
+            commitMessage: result.commitMessage,
+            fixedAt: result.fixedAt,
+          };
+        })
+        .filter((result): result is NonNullable<typeof result> => result !== null),
+    });
+
+    return {
+      output: [
+        `[fix_comments] completed at ${now}`,
+        `[fix_comments] repo=${repoLabel}`,
+        `[fix_comments] reviewer=${reviewerId}`,
+        `[fix_comments] fixer=${fixerAgent}`,
+        `[fix_comments] fixed=${results.length}`,
+        ...progressOutput.slice(-12),
+      ],
+      steps: [
+        {
+          step: "load_fixable_comments",
+          detail: `${fixableComments.length} actionable review comment(s)`,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "run_fixer",
+          detail: fixerAgent,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "persist_fix_results",
+          detail: `Stored ${results.length} local fix result(s) in Convex`,
           status: "done" as const,
           ts: now,
         },
