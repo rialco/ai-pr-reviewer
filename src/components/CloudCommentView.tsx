@@ -1745,7 +1745,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                     value={preferredActionAgent}
                     onValueChange={(value) => setPreferredActionAgent(value as "claude" | "codex")}
                   >
-                    <SelectTrigger className="h-8 w-[190px] bg-transparent text-xs">
+                    <SelectTrigger className="h-8 w-[240px] bg-transparent text-xs">
                       {preferredActionAgent ? (
                         <AgentInlineLabel agent={preferredActionAgent} prefix="Preferred agent" />
                       ) : (
@@ -1915,7 +1915,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                       value={preferredActionAgent}
                       onValueChange={(value) => setPreferredActionAgent(value as "claude" | "codex")}
                     >
-                      <SelectTrigger className="h-8 w-[190px] bg-transparent text-xs">
+                      <SelectTrigger className="h-8 w-[240px] bg-transparent text-xs">
                         {preferredActionAgent ? (
                           <AgentInlineLabel agent={preferredActionAgent} prefix="Preferred agent" />
                         ) : (
