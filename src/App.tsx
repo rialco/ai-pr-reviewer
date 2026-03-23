@@ -89,7 +89,7 @@ export function App() {
                 opacity: reposCollapsed ? 0.7 : 1,
               }}
             >
-              <div className="overflow-hidden">
+              <div className={cn("min-h-0", reposCollapsed ? "overflow-hidden" : "overflow-visible")}>
                 <div className="space-y-2 border-t border-border/50 px-4 py-2">
                   <RepoList />
                   <AddRepo />
