@@ -1731,17 +1731,20 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 {selectedMachineSlug && availableAnalyzerAgents.length > 0 ? (
-                  <Select
-                    value={preferredActionAgent}
-                    onValueChange={(value) => setPreferredActionAgent(value as "claude" | "codex")}
-                  >
-                    <SelectTrigger className="h-8 w-[240px] bg-transparent text-xs">
-                      {preferredActionAgent ? (
-                        <AgentInlineLabel agent={preferredActionAgent} prefix="Preferred agent" />
-                      ) : (
-                        <SelectValue placeholder="Preferred agent" />
-                      )}
-                    </SelectTrigger>
+                    <Select
+                      value={preferredActionAgent}
+                      onValueChange={(value) => setPreferredActionAgent(value as "claude" | "codex")}
+                    >
+                      <SelectTrigger className="h-8 w-[240px] bg-transparent text-xs">
+                        {preferredActionAgent ? (
+                          <span className="flex min-w-0 flex-1 items-center gap-1.5 pr-4">
+                            <AgentLogo agent={preferredActionAgent} className="h-3.5 w-3.5 shrink-0" />
+                            <span className="truncate">Preferred agent {getAgentLabel(preferredActionAgent)}</span>
+                          </span>
+                        ) : (
+                          <SelectValue placeholder="Preferred agent" />
+                        )}
+                      </SelectTrigger>
                     <SelectContent>
                       {availableAnalyzerAgents.map((agent) => (
                         <SelectItem key={`github-action-agent-${agent}`} value={agent}>
@@ -1907,7 +1910,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                     >
                       <SelectTrigger className="h-8 w-[240px] bg-transparent text-xs">
                         {preferredActionAgent ? (
-                          <AgentInlineLabel agent={preferredActionAgent} prefix="Preferred agent" />
+                          <span className="flex min-w-0 flex-1 items-center gap-1.5 pr-4">
+                            <AgentLogo agent={preferredActionAgent} className="h-3.5 w-3.5 shrink-0" />
+                            <span className="truncate">Preferred agent {getAgentLabel(preferredActionAgent)}</span>
+                          </span>
                         ) : (
                           <SelectValue placeholder="Preferred agent" />
                         )}
