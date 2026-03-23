@@ -113,8 +113,8 @@ export function RepoList() {
                 <Popover
                   open={expandedRepoId === repo._id}
                   onOpenChange={(open) => setExpandedRepoId(open ? repo._id : null)}
-                  align="right"
-                  contentClassName="w-[20rem] max-w-[calc(100vw-1rem)]"
+                  contentContainerClassName="fixed left-[calc(350px+8px)] top-2"
+                  contentClassName="max-h-[calc(100vh-1rem)] w-[20rem] max-w-[calc(100vw-1rem)] overflow-y-auto"
                   content={
                     <div className="space-y-3 p-3">
                       <div className="flex items-start justify-between gap-3">
