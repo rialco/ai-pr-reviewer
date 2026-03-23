@@ -1,8 +1,9 @@
 import { useMutation, useQuery } from "convex/react";
-import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, Check, ChevronRight, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, Loader2, Minus, Plus, RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronRight, Clock3, ExternalLink, FileCode, GitBranch, GitCommitHorizontal, Github, History, Loader2, MessageSquareReply, Minus, Plus, RefreshCw, Sparkles, Upload, Users, Wrench, X } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import { useActiveWorkspace } from "@/hooks/useActiveWorkspace";
+import { cn } from "@/lib/utils";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -51,6 +52,77 @@ const categoryLabel: Record<string, string> = {
   UNTRIAGED: "Pending Triage",
 };
 
+type TimelineDisplayItem =
+  | {
+      key: string;
+      kind: "suggested";
+      title: string;
+      description: string;
+      icon: typeof Sparkles;
+      buttonLabel?: string;
+      tone: "warning" | "info" | "success" | "neutral";
+      onClick?: () => void;
+      disabled?: boolean;
+    }
+  | {
+      key: string;
+      kind: "event";
+      title: string;
+      description: string | null;
+      meta?: string | null;
+      icon: typeof Sparkles;
+      color: string;
+      event: {
+        _id: string;
+        createdAt: string;
+        debugDetail?: unknown;
+      };
+      isLatest: boolean;
+    };
+
+const timelineEventConfig: Record<string, { icon: typeof Sparkles; label: string; color: string }> = {
+  comments_fetched: { icon: RefreshCw, label: "Comments synced", color: "text-blue-400" },
+  analysis_requested: { icon: Sparkles, label: "Analysis requested", color: "text-violet-400" },
+  comments_analyzed: { icon: Sparkles, label: "Comments analyzed", color: "text-violet-400" },
+  fix_started: { icon: Wrench, label: "Fix started", color: "text-yellow-400" },
+  fix_completed: { icon: Check, label: "Fix committed", color: "text-emerald-400" },
+  fix_no_changes: { icon: AlertCircle, label: "Fix — no changes", color: "text-muted-foreground" },
+  fix_failed: { icon: X, label: "Fix failed", color: "text-destructive" },
+  local_fix_started: { icon: Wrench, label: "Local fix started", color: "text-yellow-400" },
+  local_fix_completed: { icon: Check, label: "Local fix committed", color: "text-emerald-400" },
+  local_fix_no_changes: { icon: AlertCircle, label: "Local fix — no changes", color: "text-muted-foreground" },
+  local_fix_failed: { icon: X, label: "Local fix failed", color: "text-destructive" },
+  review_requested: { icon: Users, label: "Review requested", color: "text-blue-400" },
+  review_completed: { icon: Users, label: "Review completed", color: "text-emerald-400" },
+  comments_replied: { icon: MessageSquareReply, label: "Replied on GitHub", color: "text-emerald-400" },
+  review_publish_requested: { icon: Upload, label: "Review publish requested", color: "text-blue-400" },
+  review_published: { icon: Upload, label: "Review published", color: "text-emerald-400" },
+  comment_recategorized: { icon: Sparkles, label: "Comment recategorized", color: "text-sky-300" },
+};
+
+type SectionColor =
+  | "must_fix"
+  | "should_fix"
+  | "nice_to_have"
+  | "dismiss"
+  | "already_addressed"
+  | "fixing"
+  | "fixed"
+  | "fix_failed"
+  | "muted";
+
+const sectionColorMap: Record<SectionColor, string> = {
+  must_fix: "bg-must-fix",
+  should_fix: "bg-should-fix",
+  nice_to_have: "bg-nice-to-have",
+  dismiss: "bg-dismiss",
+  already_addressed: "bg-already-addressed",
+  fixing: "bg-fixing",
+  fixed: "bg-fixed",
+  fix_failed: "bg-fix-failed",
+  muted: "bg-muted-foreground/40",
+};
+
 function formatTimestamp(value: string) {
   return new Date(value).toLocaleString();
 }
@@ -85,6 +157,322 @@ function getTimelineRunHistory(debugDetail: Record<string, unknown> | null) {
     return null;
   }
   return candidate as TimelineRunHistory;
+}
+
+function getTimelineConfig(eventType: string) {
+  return (
+    timelineEventConfig[eventType] ?? {
+      icon: History,
+      label: eventType.replaceAll("_", " "),
+      color: "text-muted-foreground",
+    }
+  );
+}
+
+function joinMeta(items: string[] | undefined): string | null {
+  if (!items || items.length === 0) return null;
+  return items.join(", ");
+}
+
+function AnalysisDetailsPanel({
+  analysisReasoning,
+  analysisDetails,
+  suggestion,
+}: {
+  analysisReasoning?: string | null;
+  analysisDetails?: {
+    verdict?: string | null;
+    severity?: string | null;
+    confidence?: number | null;
+    accessMode?: string | null;
+    evidence?: {
+      filesRead?: string[];
+      symbolsChecked?: string[];
+      callersChecked?: string[];
+      testsChecked?: string[];
+      riskSummary?: string;
+      validationNotes?: string;
+    } | null;
+  } | null;
+  suggestion?: string | null;
+}) {
+  if (!analysisReasoning && !analysisDetails && !suggestion) return null;
+
+  return (
+    <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-100/90">
+      {analysisReasoning ? (
+        <>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
+            Analysis
+          </p>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{analysisReasoning}</p>
+        </>
+      ) : null}
+
+      {analysisDetails ? (
+        <div className="mt-3 rounded border border-emerald-500/15 bg-black/10 p-3 text-xs text-emerald-100/80">
+          <div className="flex flex-wrap gap-2">
+            {analysisDetails.severity ? (
+              <Badge variant={categoryVariant[analysisDetails.severity] ?? "outline"}>
+                {categoryLabel[analysisDetails.severity] ?? analysisDetails.severity}
+              </Badge>
+            ) : null}
+            {analysisDetails.confidence != null ? (
+              <Badge variant="outline">Confidence {analysisDetails.confidence}/5</Badge>
+            ) : null}
+            {analysisDetails.verdict ? (
+              <Badge variant="outline">{analysisDetails.verdict}</Badge>
+            ) : null}
+            {analysisDetails.accessMode ? (
+              <Badge variant="outline">
+                {analysisDetails.accessMode === "FULL_CODEBASE" ? "Full Codebase" : "Diff Only"}
+              </Badge>
+            ) : null}
+          </div>
+
+          {analysisDetails.evidence?.riskSummary ? (
+            <p className="mt-2"><span className="font-medium text-foreground">Risk:</span> {analysisDetails.evidence.riskSummary}</p>
+          ) : null}
+          {analysisDetails.evidence?.validationNotes ? (
+            <p className="mt-1"><span className="font-medium text-foreground">Limitations:</span> {analysisDetails.evidence.validationNotes}</p>
+          ) : null}
+          {joinMeta(analysisDetails.evidence?.filesRead) ? (
+            <p className="mt-1"><span className="font-medium text-foreground">Files:</span> {joinMeta(analysisDetails.evidence?.filesRead)}</p>
+          ) : null}
+          {joinMeta(analysisDetails.evidence?.symbolsChecked) ? (
+            <p className="mt-1"><span className="font-medium text-foreground">Symbols:</span> {joinMeta(analysisDetails.evidence?.symbolsChecked)}</p>
+          ) : null}
+          {joinMeta(analysisDetails.evidence?.callersChecked) ? (
+            <p className="mt-1"><span className="font-medium text-foreground">Callers:</span> {joinMeta(analysisDetails.evidence?.callersChecked)}</p>
+          ) : null}
+          {joinMeta(analysisDetails.evidence?.testsChecked) ? (
+            <p className="mt-1"><span className="font-medium text-foreground">Tests:</span> {joinMeta(analysisDetails.evidence?.testsChecked)}</p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {suggestion ? (
+        <div className="mt-3 rounded border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-100/85">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
+            Suggested Change
+          </p>
+          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5">
+            {suggestion}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CollapsibleSection({
+  title,
+  count,
+  badge,
+  action,
+  color,
+  defaultOpen = true,
+  opacity,
+  embedded,
+  children,
+}: {
+  title: string;
+  count: number;
+  badge?: ReactNode;
+  action?: ReactNode;
+  color?: SectionColor;
+  defaultOpen?: boolean;
+  opacity?: string;
+  embedded?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  if (count === 0) return null;
+  const pip = color ? sectionColorMap[color] : null;
+
+  return (
+    <div className={embedded ? "" : "rounded-lg border border-border overflow-hidden"}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen(!open)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen(!open);
+          }
+        }}
+        className={cn(
+          "flex items-center gap-2.5 px-3 cursor-pointer select-none transition-colors duration-100 hover:bg-white/[0.04] active:bg-white/[0.06]",
+          embedded ? "h-[34px]" : "h-[40px]",
+          open ? "bg-white/[0.02]" : "",
+        )}
+      >
+        {pip ? <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", pip)} /> : null}
+        <span className={cn("font-semibold tracking-wide uppercase text-muted-foreground", embedded ? "text-[10px]" : "text-[11px]")}>
+          {title}
+        </span>
+        <span className={cn("tabular-nums text-muted-foreground/50", embedded ? "text-[10px]" : "text-[11px]")}>
+          {count}
+        </span>
+        {badge ? <span className="ml-0.5">{badge}</span> : null}
+        <ChevronRight className={cn("ml-auto h-3 w-3 text-muted-foreground/40 transition-transform duration-200", open && "rotate-90")} />
+        {action ? (
+          <span onClick={(e) => e.stopPropagation()} className="ml-1">
+            {action}
+          </span>
+        ) : null}
+      </div>
+      <div className="grid transition-[grid-template-rows] duration-200 ease-out" style={{ gridTemplateRows: open ? "1fr" : "0fr" }}>
+        <div className="overflow-hidden">
+          <div className={cn("space-y-2 p-2", opacity)}>{children}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TimelineCard({
+  events,
+  suggestion,
+  onViewDetails,
+}: {
+  events: Array<{ _id: string; eventType: string; detail: Record<string, unknown>; createdAt: string; debugDetail?: unknown }>;
+  suggestion: TimelineDisplayItem | null;
+  onViewDetails: (eventId: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const items = useMemo<TimelineDisplayItem[]>(() => {
+    const eventItems = events.map((event, index) => {
+      const config = getTimelineConfig(event.eventType);
+      return {
+        key: event._id,
+        kind: "event" as const,
+        title: config.label,
+        description: formatTimelineDetail(event),
+        meta: `${formatRelativeTime(event.createdAt)} • ${formatTimestamp(event.createdAt)}`,
+        icon: config.icon,
+        color: config.color,
+        event,
+        isLatest: index === 0,
+      };
+    });
+    return suggestion ? [suggestion, ...eventItems] : eventItems;
+  }, [events, suggestion]);
+  const visible = expanded ? items : items.slice(0, 6);
+
+  return (
+    <div className="rounded-lg border border-border overflow-hidden">
+      <SectionHeader
+        role="button"
+        tabIndex={0}
+        onClick={() => setExpanded(!expanded)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setExpanded(!expanded);
+          }
+        }}
+        title="Timeline"
+        detail={(
+          <span className="ml-auto flex items-center gap-2">
+            <History className="h-3.5 w-3.5 text-muted-foreground/60" />
+            {events.length} event{events.length !== 1 ? "s" : ""}
+            <ChevronDown className={cn("h-3 w-3 text-muted-foreground/40 transition-transform duration-200", expanded && "rotate-180")} />
+          </span>
+        )}
+        pipClassName="bg-primary/70"
+        interactive
+      />
+      <div className="divide-y divide-border/50">
+        {visible.map((item, index) => {
+          if (item.kind === "suggested") {
+            const Icon = item.icon;
+            const toneClass = {
+              warning: "border-amber-400/20 bg-amber-400/6",
+              info: "border-sky-400/20 bg-sky-400/6",
+              success: "border-emerald-400/20 bg-emerald-400/6",
+              neutral: "border-border bg-surface/70",
+            }[item.tone];
+            const toneAccent = {
+              warning: "text-amber-300",
+              info: "text-sky-300",
+              success: "text-emerald-300",
+              neutral: "text-muted-foreground",
+            }[item.tone];
+            return (
+              <div key={item.key} className="px-3 py-3">
+                <div className={cn("rounded-xl border px-3.5 py-3", toneClass)}>
+                  <div className="flex items-start gap-3">
+                    <div className={cn("rounded-lg border border-current/10 bg-background/60 p-2", toneAccent)}>
+                      <Icon className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={cn("text-[10px] font-semibold uppercase tracking-[0.16em]", toneAccent)}>Suggested next step</span>
+                        <ArrowRight className="h-3 w-3 text-muted-foreground/40" />
+                        <span className="text-sm font-medium text-foreground/92">{item.title}</span>
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground/85">{item.description}</p>
+                    </div>
+                    {item.buttonLabel && item.onClick ? (
+                      <Button size="sm" className="h-8 shrink-0" onClick={item.onClick} disabled={item.disabled}>
+                        {item.buttonLabel}
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
+          const Icon = item.icon;
+          const previousItem = visible[index - 1];
+          const nextItem = visible[index + 1];
+          const hasPreviousConnection = previousItem?.kind === "event";
+          const hasNextConnection = nextItem?.kind === "event";
+
+          return (
+            <div key={item.key} className={cn("flex gap-3 px-3 py-3 transition-opacity duration-200", item.isLatest ? "opacity-100" : "opacity-45 hover:opacity-80")}>
+              <div className="relative flex w-8 shrink-0 justify-center">
+                {hasPreviousConnection ? <span className="absolute left-1/2 top-[-12px] h-[16px] w-px -translate-x-1/2 bg-foreground/20" /> : null}
+                {hasNextConnection ? <span className="absolute left-1/2 top-8 bottom-[-12px] w-px -translate-x-1/2 bg-foreground/20" /> : null}
+                <div className={cn("relative z-10 mt-0.5 flex h-7 w-7 items-center justify-center rounded-full border bg-background/90", item.isLatest ? "border-current/20 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]" : "border-border/80", item.color)}>
+                  <Icon className="h-3.5 w-3.5" />
+                </div>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium text-foreground/92">{item.title}</span>
+                  {item.isLatest ? <Badge variant="outline" className="h-4 px-1.5 text-[9px] uppercase tracking-wide">Latest</Badge> : null}
+                </div>
+                {item.meta ? (
+                  <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/62">
+                    <Clock3 className="h-3 w-3 shrink-0" />
+                    <span>{item.meta}</span>
+                  </p>
+                ) : null}
+                {item.description ? <p className="mt-0.5 text-[11px] leading-5 text-muted-foreground/75">{item.description}</p> : null}
+              </div>
+              {item.event.debugDetail ? (
+                <Button variant="outline" size="sm" className="h-6 shrink-0 gap-1.5 px-2 text-[10px]" onClick={() => onViewDetails(item.event._id)}>
+                  <FileCode className="h-3 w-3" />
+                  View details
+                </Button>
+              ) : null}
+            </div>
+          );
+        })}
+        {items.length > 6 && !expanded ? (
+          <div className="border-t border-border/50 px-3 py-1">
+            <button onClick={() => setExpanded(true)} className="text-[11px] text-muted-foreground/60 hover:text-muted-foreground transition-colors">
+              Show {items.length - 6} more...
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 function CommentTypeBadge({ type }: { type: "inline" | "review" | "issue_comment" }) {
@@ -214,6 +602,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
   const [timelineTab, setTimelineTab] = useState<"history" | "parameters" | "prompt">("history");
   const [selectedReviewerId, setSelectedReviewerId] = useState<"claude" | "codex" | null>(null);
+  const [reviewDetailsTab, setReviewDetailsTab] = useState<"summary" | "raw">("summary");
   const [showBody, setShowBody] = useState(false);
   const [showAllFiles, setShowAllFiles] = useState(false);
   const timelineEventDetail = useQuery(
@@ -240,6 +629,16 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
 
   const selectedMachine = repoMachineConfigs.find((config) => config.machineSlug === selectedMachineSlug) ?? null;
   const selectedMachineRecord = machines?.find((machine) => machine.slug === selectedMachineSlug) ?? null;
+  const preferredAnalyzerAgent: "claude" | "codex" | null = selectedMachineRecord?.capabilities.claude
+    ? "claude"
+    : selectedMachineRecord?.capabilities.codex
+      ? "codex"
+      : null;
+  const preferredFixerAgent: "claude" | "codex" | null = selectedMachineRecord?.capabilities.claude
+    ? "claude"
+    : selectedMachineRecord?.capabilities.codex
+      ? "codex"
+      : null;
   const pendingReviewCommentCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const comment of reviewComments ?? []) {
@@ -341,10 +740,98 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     timelineEventDetail ?? (timeline ?? []).find((event) => event._id === selectedTimelineEventId) ?? null;
   const selectedReviewerSummary =
     reviewerSummaries.find((summary) => summary.reviewerId === selectedReviewerId) ?? null;
+  const githubBotComments = useMemo(
+    () => githubComments.filter((comment) => botUsers.includes(comment.user)),
+    [botUsers, githubComments],
+  );
+  const githubPending = useMemo(
+    () => githubBotComments.filter((comment) => comment.status === "new" || comment.status === "analyzing"),
+    [githubBotComments],
+  );
+  const githubFixing = useMemo(
+    () => githubBotComments.filter((comment) => comment.status === "fixing"),
+    [githubBotComments],
+  );
+  const githubFixFailed = useMemo(
+    () => githubBotComments.filter((comment) => comment.status === "fix_failed"),
+    [githubBotComments],
+  );
+  const githubFixed = useMemo(
+    () => githubBotComments.filter((comment) => comment.status === "fixed"),
+    [githubBotComments],
+  );
+  const githubMustFix = useMemo(
+    () => githubBotComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "MUST_FIX"),
+    [githubBotComments],
+  );
+  const githubShouldFix = useMemo(
+    () => githubBotComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "SHOULD_FIX"),
+    [githubBotComments],
+  );
+  const githubNiceToHave = useMemo(
+    () => githubBotComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "NICE_TO_HAVE"),
+    [githubBotComments],
+  );
+  const githubAlreadyAddressed = useMemo(
+    () => githubBotComments.filter((comment) => comment.analysisCategory === "ALREADY_ADDRESSED"),
+    [githubBotComments],
+  );
+  const githubDismissedByAnalysis = useMemo(
+    () => githubBotComments.filter((comment) => comment.analysisCategory === "DISMISS"),
+    [githubBotComments],
+  );
+  const githubReanalyzableCount = useMemo(
+    () => githubBotComments.filter((comment) => comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed").length,
+    [githubBotComments],
+  );
+  const reviewPending = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.status === "new" || comment.status === "analyzing"),
+    [reviewComments],
+  );
+  const reviewFixing = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.status === "fixing"),
+    [reviewComments],
+  );
+  const reviewFixFailed = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.status === "fix_failed"),
+    [reviewComments],
+  );
+  const reviewFixed = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.status === "fixed"),
+    [reviewComments],
+  );
+  const reviewMustFix = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "MUST_FIX"),
+    [reviewComments],
+  );
+  const reviewShouldFix = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "SHOULD_FIX"),
+    [reviewComments],
+  );
+  const reviewNiceToHave = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "NICE_TO_HAVE"),
+    [reviewComments],
+  );
+  const reviewAlreadyAddressed = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.analysisCategory === "ALREADY_ADDRESSED"),
+    [reviewComments],
+  );
+  const reviewDismissedByAnalysis = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.analysisCategory === "DISMISS"),
+    [reviewComments],
+  );
+  const reviewReanalyzableCount = useMemo(
+    () => (reviewComments ?? []).filter((comment) => !comment.supersededAt && (comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed")).length,
+    [reviewComments],
+  );
 
   useEffect(() => {
     setTimelineTab("history");
   }, [selectedTimelineEventId]);
+
+  useEffect(() => {
+    setReviewDetailsTab("summary");
+  }, [selectedReviewerId]);
 
   if (!activeWorkspaceId || detail === undefined) {
     return (
@@ -411,6 +898,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const handleAnalyzeReviewComments = async (
     reviewerId: "claude" | "codex",
     analyzerAgent: "claude" | "codex",
+    reanalyze = false,
   ) => {
     if (!activeWorkspaceId || !selectedMachineSlug) {
       return;
@@ -425,13 +913,14 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         machineSlug: selectedMachineSlug,
         reviewerId,
         analyzerAgent,
+        reanalyze,
       });
     } catch (error) {
       setAnalysisError(error instanceof Error ? error.message : String(error));
     }
   };
 
-  const handleAnalyzeGithubComments = async (analyzerAgent: "claude" | "codex") => {
+  const handleAnalyzeGithubComments = async (analyzerAgent: "claude" | "codex", reanalyze = false) => {
     if (!activeWorkspaceId || !selectedMachineSlug) {
       return;
     }
@@ -444,6 +933,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         prNumber,
         machineSlug: selectedMachineSlug,
         analyzerAgent,
+        reanalyze,
       });
     } catch (error) {
       setAnalysisError(error instanceof Error ? error.message : String(error));
@@ -543,6 +1033,72 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       category,
     });
   };
+
+  const suggestedTimelineStep: TimelineDisplayItem | null = !selectedMachineSlug
+    ? {
+        key: "suggested-select-machine",
+        kind: "suggested",
+        title: "Select a machine checkout",
+        description: "Choose a linked machine checkout before running refresh, triage, fix, or review actions for this PR.",
+        icon: Sparkles,
+        tone: "neutral",
+      }
+    : pendingGithubCommentCount > 0 && preferredAnalyzerAgent
+      ? {
+          key: "suggested-triage-github",
+          kind: "suggested",
+          title: "Analyze GitHub comments",
+          description: "New bot review comments are waiting to be triaged before they can be fixed or replied to.",
+          icon: Sparkles,
+          buttonLabel: "Analyze",
+          tone: "warning",
+          onClick: () => void handleAnalyzeGithubComments(preferredAnalyzerAgent),
+        }
+      : fixableGithubCommentCount > 0 && preferredFixerAgent
+        ? {
+            key: "suggested-fix-github",
+            kind: "suggested",
+            title: "Fix actionable GitHub comments",
+            description: "There are triaged GitHub comments ready for a local fix run.",
+            icon: Wrench,
+            buttonLabel: "Fix issues",
+            tone: "info",
+            onClick: () => void handleFixGithubComments(preferredFixerAgent),
+          }
+        : replyableGithubCommentCount > 0 && selectedMachineRecord?.capabilities.gh
+          ? {
+              key: "suggested-reply-github",
+              kind: "suggested",
+              title: "Reply to fixed comments",
+              description: "Some fixed inline comments are ready to be acknowledged back on GitHub.",
+              icon: MessageSquareReply,
+              buttonLabel: "Reply",
+              tone: "success",
+              onClick: () => void handleReplyToGithubComments(),
+            }
+          : reviewPending.length > 0 && preferredAnalyzerAgent
+            ? {
+                key: "suggested-triage-local",
+                kind: "suggested",
+                title: "Analyze local review comments",
+                description: "Review comments from local reviewers need categorization before they can be fixed or published.",
+                icon: Sparkles,
+                buttonLabel: "Analyze",
+                tone: "warning",
+                onClick: () => void handleAnalyzeReviewComments(preferredAnalyzerAgent, preferredAnalyzerAgent),
+              }
+            : preferredAnalyzerAgent
+              ? {
+                  key: "suggested-request-review",
+                  kind: "suggested",
+                  title: `Request review with ${getAgentLabel(preferredAnalyzerAgent)}`,
+                  description: "The fastest next step is to run a fresh local review and gather actionable comments.",
+                  icon: Users,
+                  buttonLabel: "Review",
+                  tone: "neutral",
+                  onClick: () => void handleRequestReview(preferredAnalyzerAgent),
+                }
+              : null;
 
   return (
     <div className="relative space-y-4">
@@ -762,39 +1318,17 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
           </div>
         </Card>
 
-        <Card className="overflow-hidden bg-surface">
-          <SectionHeader title="Timeline" detail={timeline?.length ?? 0} pipClassName="bg-muted-foreground/40" />
-          <div className="p-4">
-            {timeline && timeline.length > 0 ? (
-              <div className="space-y-2">
-                {timeline.slice(0, 10).map((event) => {
-                  const detailSummary = formatTimelineDetail(event);
-                  return (
-                    <div key={event._id} className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-sm text-foreground/88">{timelineLabel(event.eventType)}</div>
-                          {detailSummary ? (
-                            <div className="mt-1 text-xs text-muted-foreground">{detailSummary}</div>
-                          ) : null}
-                          <div className="mt-1 text-[10px] text-muted-foreground/70">
-                            {formatRelativeTime(event.createdAt)} • {formatTimestamp(event.createdAt)}
-                          </div>
-                        </div>
-                        <Button variant="ghost" size="sm" className="shrink-0" onClick={() => setSelectedTimelineEventId(event._id)}>
-                          <ChevronRight className="h-3.5 w-3.5" />
-                          View details
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">No cloud timeline entries yet for this PR.</p>
-            )}
-          </div>
-        </Card>
+        <TimelineCard
+          events={(timeline ?? []).map((event) => ({
+            _id: event._id,
+            eventType: event.eventType,
+            detail: event.detail,
+            createdAt: event.createdAt,
+            debugDetail: event.debugDetail,
+          }))}
+          suggestion={suggestedTimelineStep}
+          onViewDetails={setSelectedTimelineEventId}
+        />
 
         <Card className="overflow-hidden bg-surface">
           <SectionHeader
@@ -844,29 +1378,28 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             ) : null}
 
             <div className="mt-3 flex flex-wrap justify-end gap-2">
-              {pendingGithubCommentCount > 0 && selectedMachineRecord?.capabilities.claude ? (
-                <Button variant="outline" size="sm" onClick={() => void handleAnalyzeGithubComments("claude")}>
-                  Triage with Claude
+              {pendingGithubCommentCount > 0 && preferredAnalyzerAgent ? (
+                <Button size="sm" onClick={() => void handleAnalyzeGithubComments(preferredAnalyzerAgent)}>
+                  <Sparkles className="h-3.5 w-3.5" />
+                  Analyze
                 </Button>
               ) : null}
-              {pendingGithubCommentCount > 0 && selectedMachineRecord?.capabilities.codex ? (
-                <Button variant="outline" size="sm" onClick={() => void handleAnalyzeGithubComments("codex")}>
-                  Triage with Codex
+              {githubReanalyzableCount > 0 && preferredAnalyzerAgent ? (
+                <Button variant="outline" size="sm" onClick={() => void handleAnalyzeGithubComments(preferredAnalyzerAgent, true)}>
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Re-analyze
                 </Button>
               ) : null}
-              {fixableGithubCommentCount > 0 && selectedMachineRecord?.capabilities.claude ? (
-                <Button variant="outline" size="sm" onClick={() => void handleFixGithubComments("claude")}>
-                  Fix with Claude
-                </Button>
-              ) : null}
-              {fixableGithubCommentCount > 0 && selectedMachineRecord?.capabilities.codex ? (
-                <Button variant="outline" size="sm" onClick={() => void handleFixGithubComments("codex")}>
-                  Fix with Codex
+              {fixableGithubCommentCount > 0 && preferredFixerAgent ? (
+                <Button size="sm" onClick={() => void handleFixGithubComments(preferredFixerAgent)}>
+                  <Wrench className="h-3.5 w-3.5" />
+                  Fix Issues ({fixableGithubCommentCount})
                 </Button>
               ) : null}
               {replyableGithubCommentCount > 0 && selectedMachineRecord?.capabilities.gh ? (
                 <Button variant="outline" size="sm" onClick={() => void handleReplyToGithubComments()}>
-                  Reply addressed
+                  <MessageSquareReply className="h-3.5 w-3.5" />
+                  Reply ({replyableGithubCommentCount})
                 </Button>
               ) : null}
             </div>
@@ -877,122 +1410,152 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
             ) : (
               <div className="mt-3 space-y-3">
-                {comments.map((comment) => {
-                  const isBotComment = botUsers.includes(comment.user);
-                  const selectedCategory = comment.analysisCategory ?? "UNTRIAGED";
-
-                  return (
+                <CollapsibleSection title="Pending Analysis" count={githubPending.length} color="muted">
+                  {githubPending.map((comment) => (
                     <Card key={comment._id} className="border-white/8 bg-zinc-900/55 p-4">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant="outline">{comment.user}</Badge>
-                            <CommentTypeBadge type={comment.type} />
-                            {comment.path ? (
-                              <Badge variant="outline">
-                                {comment.path}
-                                {comment.line ? `:${comment.line}` : ""}
-                              </Badge>
-                            ) : null}
-                            {isBotComment ? <Badge variant="outline">{comment.status}</Badge> : null}
-                            {isBotComment ? (
-                              <Badge
-                                variant={categoryVariant[comment.analysisCategory ?? "UNTRIAGED"] ?? "outline"}
-                              >
-                                {categoryLabel[comment.analysisCategory ?? "UNTRIAGED"] ?? comment.analysisCategory}
-                              </Badge>
-                            ) : null}
-                            <span className="text-xs text-muted-foreground">{formatTimestamp(comment.updatedAt)}</span>
-                          </div>
-                        </div>
-
-                        {isBotComment ? (
-                          <div className="flex flex-wrap items-center justify-end gap-2">
-                            <Select
-                              value={selectedCategory}
-                              onValueChange={(value) => {
-                                if (value === "UNTRIAGED") return;
-                                void handleRecategorizeGithubComment(
-                                  comment._id,
-                                  value as "MUST_FIX" | "SHOULD_FIX" | "NICE_TO_HAVE" | "DISMISS" | "ALREADY_ADDRESSED",
-                                );
-                              }}
-                            >
-                              <SelectTrigger className="h-8 w-[170px] bg-transparent text-xs">
-                                <SelectValue placeholder="Set category" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="UNTRIAGED">Pending Triage</SelectItem>
-                                <SelectItem value="MUST_FIX">Must Fix</SelectItem>
-                                <SelectItem value="SHOULD_FIX">Should Fix</SelectItem>
-                                <SelectItem value="NICE_TO_HAVE">Nice to Have</SelectItem>
-                                <SelectItem value="ALREADY_ADDRESSED">Already Addressed</SelectItem>
-                                <SelectItem value="DISMISS">Dismiss</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        ) : null}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">{comment.user}</Badge>
+                        <CommentTypeBadge type={comment.type} />
+                        {comment.path ? <Badge variant="outline">{comment.path}{comment.line ? `:${comment.line}` : ""}</Badge> : null}
+                        <Badge variant="outline">{comment.status}</Badge>
+                        <span className="text-xs text-muted-foreground">{formatTimestamp(comment.updatedAt)}</span>
                       </div>
-
                       <div className="mt-3 text-sm leading-6 text-foreground/88">
                         <MarkdownBody text={comment.body} />
                       </div>
+                    </Card>
+                  ))}
+                </CollapsibleSection>
 
-                      {isBotComment && comment.analysisReasoning ? (
-                        <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-100/90">
-                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
-                            Triage Reasoning
-                          </p>
-                          <p className="mt-2 whitespace-pre-wrap text-sm leading-6">
-                            {comment.analysisReasoning}
-                          </p>
-                          {comment.analysisDetails?.confidence != null || comment.analysisDetails?.accessMode ? (
-                            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-emerald-100/75">
-                              {comment.analysisDetails?.confidence != null ? (
-                                <Badge variant="outline">Confidence {comment.analysisDetails.confidence}/5</Badge>
-                              ) : null}
-                              {comment.analysisDetails?.accessMode ? (
-                                <Badge variant="outline">
-                                  {comment.analysisDetails.accessMode === "FULL_CODEBASE" ? "Full Codebase" : "Diff Only"}
-                                </Badge>
-                              ) : null}
+                <CollapsibleSection
+                  title="Analyzed"
+                  count={githubMustFix.length + githubShouldFix.length + githubNiceToHave.length + githubFixing.length + githubFixFailed.length + githubAlreadyAddressed.length + githubDismissedByAnalysis.length}
+                  color="must_fix"
+                  badge={
+                    <span className="ml-1 flex gap-1">
+                      {githubMustFix.length > 0 ? <Badge variant="must_fix">{githubMustFix.length} must fix</Badge> : null}
+                      {githubShouldFix.length > 0 ? <Badge variant="should_fix">{githubShouldFix.length} should fix</Badge> : null}
+                      {githubFixFailed.length > 0 ? <Badge variant="fix_failed">{githubFixFailed.length} failed</Badge> : null}
+                    </span>
+                  }
+                >
+                  {([
+                    ["Fixing", githubFixing, "fixing"],
+                    ["Must Fix", githubMustFix, "must_fix"],
+                    ["Should Fix", githubShouldFix, "should_fix"],
+                    ["Nice to Have", githubNiceToHave, "nice_to_have"],
+                    ["Fix Failed", githubFixFailed, "fix_failed"],
+                    ["Already Addressed", githubAlreadyAddressed, "already_addressed"],
+                    ["Dismissed by Analysis", githubDismissedByAnalysis, "dismiss"],
+                  ] as const).map(([title, group, color]) => (
+                    <CollapsibleSection key={title} title={title} count={group.length} color={color as SectionColor} embedded defaultOpen={title === "Must Fix" || title === "Should Fix" || title === "Fixing"}>
+                      {group.map((comment) => {
+                        const selectedCategory = comment.analysisCategory ?? "UNTRIAGED";
+                        return (
+                          <Card key={comment._id} className="border-white/8 bg-zinc-900/55 p-4">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Badge variant="outline">{comment.user}</Badge>
+                                  <CommentTypeBadge type={comment.type} />
+                                  {comment.path ? <Badge variant="outline">{comment.path}{comment.line ? `:${comment.line}` : ""}</Badge> : null}
+                                  <Badge variant="outline">{comment.status}</Badge>
+                                  {comment.analysisCategory ? (
+                                    <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
+                                      {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
+                                    </Badge>
+                                  ) : null}
+                                  <span className="text-xs text-muted-foreground">{formatTimestamp(comment.updatedAt)}</span>
+                                </div>
+                              </div>
+                              <Select
+                                value={selectedCategory}
+                                onValueChange={(value) => {
+                                  if (value === "UNTRIAGED") return;
+                                  void handleRecategorizeGithubComment(
+                                    comment._id,
+                                    value as "MUST_FIX" | "SHOULD_FIX" | "NICE_TO_HAVE" | "DISMISS" | "ALREADY_ADDRESSED",
+                                  );
+                                }}
+                              >
+                                <SelectTrigger className="h-8 w-[170px] bg-transparent text-xs">
+                                  <SelectValue placeholder="Set category" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="UNTRIAGED">Pending Triage</SelectItem>
+                                  <SelectItem value="MUST_FIX">Must Fix</SelectItem>
+                                  <SelectItem value="SHOULD_FIX">Should Fix</SelectItem>
+                                  <SelectItem value="NICE_TO_HAVE">Nice to Have</SelectItem>
+                                  <SelectItem value="ALREADY_ADDRESSED">Already Addressed</SelectItem>
+                                  <SelectItem value="DISMISS">Dismiss</SelectItem>
+                                </SelectContent>
+                              </Select>
                             </div>
-                          ) : null}
-                        </div>
-                      ) : null}
-                      {isBotComment && comment.fixCommitHash ? (
+                            <div className="mt-3 text-sm leading-6 text-foreground/88">
+                              <MarkdownBody text={comment.body} />
+                            </div>
+                            <AnalysisDetailsPanel
+                              analysisReasoning={comment.analysisReasoning}
+                              analysisDetails={comment.analysisDetails}
+                            />
+                            {comment.fixCommitHash ? (
+                              <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
+                                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>
+                                <p className="mt-2 text-sm leading-6">
+                                  Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
+                                  {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
+                                </p>
+                                {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
+                                  <p className="mt-1 text-xs text-sky-100/80">
+                                    {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
+                                    {comment.fixFilesChanged.length > 4 ? "..." : ""}
+                                  </p>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </Card>
+                        );
+                      })}
+                    </CollapsibleSection>
+                  ))}
+                </CollapsibleSection>
+
+                <CollapsibleSection title="Fixed" count={githubFixed.length} color="fixed" defaultOpen={false}>
+                  {githubFixed.map((comment) => (
+                    <Card key={comment._id} className="border-white/8 bg-zinc-900/55 p-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">{comment.user}</Badge>
+                        <CommentTypeBadge type={comment.type} />
+                        {comment.path ? <Badge variant="outline">{comment.path}{comment.line ? `:${comment.line}` : ""}</Badge> : null}
+                        <Badge variant="fixed">Fixed</Badge>
+                        {comment.analysisCategory ? (
+                          <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
+                            {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
+                          </Badge>
+                        ) : null}
+                      </div>
+                      <div className="mt-3 text-sm leading-6 text-foreground/88">
+                        <MarkdownBody text={comment.body} />
+                      </div>
+                      <AnalysisDetailsPanel analysisReasoning={comment.analysisReasoning} analysisDetails={comment.analysisDetails} />
+                      {comment.fixCommitHash ? (
                         <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
-                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
-                            Fix Result
-                          </p>
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>
                           <p className="mt-2 text-sm leading-6">
                             Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
-                            {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
                           </p>
-                          {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
-                            <p className="mt-1 text-xs text-sky-100/80">
-                              {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
-                              {comment.fixFilesChanged.length > 4 ? "..." : ""}
-                            </p>
-                          ) : null}
                         </div>
                       ) : null}
-                      {isBotComment && comment.repliedAt ? (
+                      {comment.repliedAt ? (
                         <div className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-sm text-violet-100/90">
-                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">
-                            Reply Posted
-                          </p>
-                          <p className="mt-2 text-sm leading-6">
-                            Replied on {formatTimestamp(comment.repliedAt)}
-                          </p>
-                          {comment.replyBody ? (
-                            <p className="mt-1 text-xs text-violet-100/80">{comment.replyBody}</p>
-                          ) : null}
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">Reply Posted</p>
+                          <p className="mt-2 text-sm leading-6">Replied on {formatTimestamp(comment.repliedAt)}</p>
+                          {comment.replyBody ? <p className="mt-1 text-xs text-violet-100/80">{comment.replyBody}</p> : null}
                         </div>
                       ) : null}
                     </Card>
-                  );
-                })}
+                  ))}
+                </CollapsibleSection>
               </div>
             )}
           </div>
@@ -1007,47 +1570,49 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
             ) : null}
             {selectedMachineRecord ? (
-              <div className="space-y-2">
+              <div className="flex flex-wrap justify-end gap-2">
                 {(["claude", "codex"] as const).map((reviewerId) => {
                   const pendingCount = pendingReviewCommentCounts.get(reviewerId) ?? 0;
-                  const fixableCount = fixableReviewCommentCounts.get(reviewerId) ?? 0;
-                  const publishableCount = publishableReviewCommentCounts.get(reviewerId) ?? 0;
-                  if (pendingCount === 0 && fixableCount === 0 && publishableCount === 0) return null;
+                  const reanalyzeCount = (reviewComments ?? []).filter(
+                    (comment) =>
+                      comment.reviewerId === reviewerId &&
+                      !comment.supersededAt &&
+                      (comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed"),
+                  ).length;
+                  const fixCount = (reviewComments ?? []).filter(
+                    (comment) =>
+                      comment.reviewerId === reviewerId &&
+                      !comment.supersededAt &&
+                      (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX") &&
+                      (comment.status === "analyzed" || comment.status === "fix_failed"),
+                  ).length;
+                  const publishCount = publishableReviewCommentCounts.get(reviewerId) ?? 0;
+                  if (pendingCount === 0 && reanalyzeCount === 0 && fixCount === 0 && publishCount === 0) return null;
 
                   return (
-                    <div
-                      key={`${reviewerId}-actions`}
-                      className="flex flex-wrap items-center gap-2 rounded-lg border border-white/8 bg-black/10 px-3 py-2"
-                    >
-                      <span className="text-xs text-muted-foreground">
-                        {getAgentLabel(reviewerId)}
-                        {pendingCount > 0 ? ` · ${pendingCount} pending triage` : ""}
-                        {fixableCount > 0 ? ` · ${fixableCount} ready to fix` : ""}
-                        {publishableCount > 0 ? ` · ${publishableCount} ready to publish` : ""}
-                      </span>
-                      {pendingCount > 0 && selectedMachineRecord.capabilities.claude ? (
-                        <Button variant="outline" size="sm" onClick={() => void handleAnalyzeReviewComments(reviewerId, "claude")}>
-                          Triage with Claude
+                    <div key={`${reviewerId}-toolbar`} className="flex flex-wrap gap-2">
+                      {pendingCount > 0 && preferredAnalyzerAgent ? (
+                        <Button size="sm" onClick={() => void handleAnalyzeReviewComments(reviewerId, preferredAnalyzerAgent)}>
+                          <Sparkles className="h-3.5 w-3.5" />
+                          Analyze {getAgentLabel(reviewerId)} ({pendingCount})
                         </Button>
                       ) : null}
-                      {pendingCount > 0 && selectedMachineRecord.capabilities.codex ? (
-                        <Button variant="outline" size="sm" onClick={() => void handleAnalyzeReviewComments(reviewerId, "codex")}>
-                          Triage with Codex
+                      {reanalyzeCount > 0 && preferredAnalyzerAgent ? (
+                        <Button variant="outline" size="sm" onClick={() => void handleAnalyzeReviewComments(reviewerId, preferredAnalyzerAgent, true)}>
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          Re-analyze {getAgentLabel(reviewerId)}
                         </Button>
                       ) : null}
-                      {fixableCount > 0 && selectedMachineRecord.capabilities.claude ? (
-                        <Button variant="outline" size="sm" onClick={() => void handleFixReviewComments(reviewerId, "claude")}>
-                          Fix with Claude
+                      {fixCount > 0 && preferredFixerAgent ? (
+                        <Button size="sm" onClick={() => void handleFixReviewComments(reviewerId, preferredFixerAgent)}>
+                          <Wrench className="h-3.5 w-3.5" />
+                          Fix {getAgentLabel(reviewerId)} ({fixCount})
                         </Button>
                       ) : null}
-                      {fixableCount > 0 && selectedMachineRecord.capabilities.codex ? (
-                        <Button variant="outline" size="sm" onClick={() => void handleFixReviewComments(reviewerId, "codex")}>
-                          Fix with Codex
-                        </Button>
-                      ) : null}
-                      {publishableCount > 0 && selectedMachineRecord.capabilities.gh ? (
+                      {publishCount > 0 && selectedMachineRecord.capabilities.gh ? (
                         <Button variant="outline" size="sm" onClick={() => void handlePublishReview(reviewerId)}>
-                          Publish to GitHub
+                          <Upload className="h-3.5 w-3.5" />
+                          Publish {getAgentLabel(reviewerId)}
                         </Button>
                       ) : null}
                     </div>
@@ -1057,60 +1622,114 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             ) : null}
             {reviewComments && reviewComments.length > 0 ? (
               <div className="mt-3 space-y-3">
-                {reviewComments.map((comment) => (
-                  <div key={comment._id} className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline">{getAgentLabel(comment.reviewerId)}</Badge>
-                      <Badge variant="outline">{comment.path}:{comment.line}</Badge>
-                      <Badge variant="outline">{comment.status}</Badge>
-                      {comment.analysisCategory ? (
-                        <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
-                          {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
-                        </Badge>
-                      ) : null}
-                    </div>
-                    <div className="mt-3 text-sm leading-6 text-foreground/88">
-                      <MarkdownBody text={comment.body} />
-                    </div>
-                    {comment.analysisReasoning ? (
-                      <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-100/90">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
-                          Triage Reasoning
-                        </p>
-                        <p className="mt-2 whitespace-pre-wrap text-sm leading-6">
-                          {comment.analysisReasoning}
-                        </p>
+                <CollapsibleSection title="Pending Triage" count={reviewPending.length} color="muted">
+                  {reviewPending.map((comment) => (
+                    <Card key={comment._id} className="border-white/8 bg-black/10 px-3 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">{getAgentLabel(comment.reviewerId)}</Badge>
+                        <Badge variant="outline">{comment.path}:{comment.line}</Badge>
+                        <Badge variant="outline">{comment.status}</Badge>
                       </div>
-                    ) : null}
-                    {comment.fixCommitHash ? (
-                      <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
-                          Fix Result
-                        </p>
-                        <p className="mt-2 text-sm leading-6">
-                          Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
-                          {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
-                        </p>
-                        {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
-                          <p className="mt-1 text-xs text-sky-100/80">
-                            {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
-                            {comment.fixFilesChanged.length > 4 ? "..." : ""}
-                          </p>
+                      <div className="mt-3 text-sm leading-6 text-foreground/88">
+                        <MarkdownBody text={comment.body} />
+                      </div>
+                    </Card>
+                  ))}
+                </CollapsibleSection>
+
+                <CollapsibleSection
+                  title="Triaged"
+                  count={reviewMustFix.length + reviewShouldFix.length + reviewNiceToHave.length + reviewFixing.length + reviewFixFailed.length + reviewAlreadyAddressed.length + reviewDismissedByAnalysis.length}
+                  color="must_fix"
+                  badge={
+                    <span className="ml-1 flex gap-1">
+                      {reviewMustFix.length > 0 ? <Badge variant="must_fix">{reviewMustFix.length} must fix</Badge> : null}
+                      {reviewShouldFix.length > 0 ? <Badge variant="should_fix">{reviewShouldFix.length} should fix</Badge> : null}
+                      {reviewFixFailed.length > 0 ? <Badge variant="fix_failed">{reviewFixFailed.length} failed</Badge> : null}
+                    </span>
+                  }
+                >
+                  {([
+                    ["Fixing", reviewFixing, "fixing"],
+                    ["Must Fix", reviewMustFix, "must_fix"],
+                    ["Should Fix", reviewShouldFix, "should_fix"],
+                    ["Nice to Have", reviewNiceToHave, "nice_to_have"],
+                    ["Fix Failed", reviewFixFailed, "fix_failed"],
+                    ["Already Addressed", reviewAlreadyAddressed, "already_addressed"],
+                    ["Dismissed by Analysis", reviewDismissedByAnalysis, "dismiss"],
+                  ] as const).map(([title, group, color]) => (
+                    <CollapsibleSection key={title} title={title} count={group.length} color={color as SectionColor} embedded defaultOpen={title === "Must Fix" || title === "Should Fix" || title === "Fixing"}>
+                      {group.map((comment) => (
+                        <Card key={comment._id} className="border-white/8 bg-black/10 px-3 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="outline">{getAgentLabel(comment.reviewerId)}</Badge>
+                            <Badge variant="outline">{comment.path}:{comment.line}</Badge>
+                            <Badge variant="outline">{comment.status}</Badge>
+                            {comment.analysisCategory ? (
+                              <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
+                                {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
+                              </Badge>
+                            ) : null}
+                          </div>
+                          <div className="mt-3 text-sm leading-6 text-foreground/88">
+                            <MarkdownBody text={comment.body} />
+                          </div>
+                          <AnalysisDetailsPanel
+                            analysisReasoning={comment.analysisReasoning}
+                            analysisDetails={comment.analysisDetails}
+                            suggestion={comment.suggestion}
+                          />
+                          {comment.fixCommitHash ? (
+                            <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>
+                              <p className="mt-2 text-sm leading-6">
+                                Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
+                                {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
+                              </p>
+                              {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
+                                <p className="mt-1 text-xs text-sky-100/80">
+                                  {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
+                                  {comment.fixFilesChanged.length > 4 ? "..." : ""}
+                                </p>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          {comment.publishedAt ? (
+                            <div className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-sm text-violet-100/90">
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">Published</p>
+                              <p className="mt-2 text-sm leading-6">Sent to GitHub on {formatTimestamp(comment.publishedAt)}</p>
+                            </div>
+                          ) : null}
+                        </Card>
+                      ))}
+                    </CollapsibleSection>
+                  ))}
+                </CollapsibleSection>
+
+                <CollapsibleSection title="Fixed" count={reviewFixed.length} color="fixed" defaultOpen={false}>
+                  {reviewFixed.map((comment) => (
+                    <Card key={comment._id} className="border-white/8 bg-black/10 px-3 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">{getAgentLabel(comment.reviewerId)}</Badge>
+                        <Badge variant="outline">{comment.path}:{comment.line}</Badge>
+                        <Badge variant="fixed">Fixed</Badge>
+                        {comment.analysisCategory ? (
+                          <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
+                            {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
+                          </Badge>
                         ) : null}
                       </div>
-                    ) : null}
-                    {comment.publishedAt ? (
-                      <div className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-sm text-violet-100/90">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">
-                          Published
-                        </p>
-                        <p className="mt-2 text-sm leading-6">
-                          Sent to GitHub on {formatTimestamp(comment.publishedAt)}
-                        </p>
+                      <div className="mt-3 text-sm leading-6 text-foreground/88">
+                        <MarkdownBody text={comment.body} />
                       </div>
-                    ) : null}
-                  </div>
-                ))}
+                      <AnalysisDetailsPanel
+                        analysisReasoning={comment.analysisReasoning}
+                        analysisDetails={comment.analysisDetails}
+                        suggestion={comment.suggestion}
+                      />
+                    </Card>
+                  ))}
+                </CollapsibleSection>
               </div>
             ) : (
               <p className="mt-3 text-sm text-muted-foreground">No review comments stored in Convex yet.</p>
@@ -1298,16 +1917,44 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               ) : null}
               <span>Updated {formatTimestamp(selectedReviewerSummary.latestReview.updatedAt)}</span>
             </div>
-            {selectedReviewerSummary.latestReview.summary ? (
-              <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
-                <MarkdownBody text={selectedReviewerSummary.latestReview.summary} />
-              </div>
-            ) : null}
-            {selectedReviewerSummary.latestReview.rawOutput ? (
+            <div className="flex items-center gap-2 border-b border-border pb-3">
+              <Button
+                variant={reviewDetailsTab === "summary" ? "secondary" : "outline"}
+                size="sm"
+                className="h-8 text-xs"
+                onClick={() => setReviewDetailsTab("summary")}
+              >
+                Summary
+              </Button>
+              <Button
+                variant={reviewDetailsTab === "raw" ? "secondary" : "outline"}
+                size="sm"
+                className="h-8 text-xs"
+                onClick={() => setReviewDetailsTab("raw")}
+                disabled={!selectedReviewerSummary.latestReview.rawOutput}
+              >
+                Raw Output
+              </Button>
+            </div>
+            {reviewDetailsTab === "summary" ? (
+              selectedReviewerSummary.latestReview.summary ? (
+                <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
+                  <MarkdownBody text={selectedReviewerSummary.latestReview.summary} />
+                </div>
+              ) : (
+                <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
+                  No structured summary was captured for this review.
+                </div>
+              )
+            ) : selectedReviewerSummary.latestReview.rawOutput ? (
               <pre className="overflow-x-auto rounded-lg border border-white/8 bg-black/10 p-3 text-xs leading-6 text-muted-foreground">
                 {selectedReviewerSummary.latestReview.rawOutput}
               </pre>
-            ) : null}
+            ) : (
+              <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
+                No raw output was captured for this review.
+              </div>
+            )}
           </div>
         ) : null}
       </Dialog>

@@ -373,6 +373,7 @@ export const enqueueGithubCommentAnalysis = mutation({
     prNumber: v.number(),
     machineSlug: v.string(),
     analyzerAgent: v.union(v.literal("claude"), v.literal("codex")),
+    reanalyze: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const { user } = await requireWorkspaceAccess(ctx, args.workspaceId);
@@ -412,14 +413,21 @@ export const enqueueGithubCommentAnalysis = mutation({
       .query("githubComments")
       .withIndex("by_prId", (q) => q.eq("prId", pr._id))
       .collect();
+    const shouldReanalyze = args.reanalyze === true;
     const pendingComments = githubComments.filter(
       (comment) =>
         repo.botUsers.includes(comment.user) &&
-        (comment.status === undefined || comment.status === "new" || comment.status === "analyzing"),
+        (comment.status === undefined ||
+          comment.status === "new" ||
+          comment.status === "analyzing" ||
+          (shouldReanalyze &&
+            (comment.status === "analyzed" ||
+              comment.status === "fix_failed" ||
+              comment.status === "fixed"))),
     );
 
     if (pendingComments.length === 0) {
-      throw new Error("No pending GitHub review comments are available to analyze.");
+      throw new Error(`No ${shouldReanalyze ? "eligible" : "pending"} GitHub review comments are available to analyze.`);
     }
 
     for (const comment of pendingComments) {
@@ -562,6 +570,7 @@ export const enqueueReviewCommentAnalysis = mutation({
     machineSlug: v.string(),
     reviewerId: v.union(v.literal("claude"), v.literal("codex")),
     analyzerAgent: v.union(v.literal("claude"), v.literal("codex")),
+    reanalyze: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const { user } = await requireWorkspaceAccess(ctx, args.workspaceId);
@@ -601,22 +610,33 @@ export const enqueueReviewCommentAnalysis = mutation({
       .query("reviewComments")
       .withIndex("by_prId", (q) => q.eq("prId", pr._id))
       .collect();
+    const shouldReanalyze = args.reanalyze === true;
     const pendingCount = reviewComments.filter(
       (comment) =>
         comment.reviewerId === args.reviewerId &&
         !comment.supersededAt &&
-        (comment.status === "new" || comment.status === "analyzing"),
+        (comment.status === "new" ||
+          comment.status === "analyzing" ||
+          (shouldReanalyze &&
+            (comment.status === "analyzed" ||
+              comment.status === "fix_failed" ||
+              comment.status === "fixed"))),
     ).length;
 
     if (pendingCount === 0) {
-      throw new Error("No pending review comments are available to analyze.");
+      throw new Error(`No ${shouldReanalyze ? "eligible" : "pending"} review comments are available to analyze.`);
     }
 
     for (const comment of reviewComments) {
       if (
         comment.reviewerId === args.reviewerId &&
         !comment.supersededAt &&
-        (comment.status === "new" || comment.status === "analyzing")
+        (comment.status === "new" ||
+          comment.status === "analyzing" ||
+          (shouldReanalyze &&
+            (comment.status === "analyzed" ||
+              comment.status === "fix_failed" ||
+              comment.status === "fixed")))
       ) {
         await ctx.db.patch(comment._id, {
           status: "analyzing",
