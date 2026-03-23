@@ -1899,33 +1899,29 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               </div>
             ) : null}
             {selectedMachineRecord ? (
-              <div className="space-y-3">
-                <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
-                      Actions
-                    </div>
-                    <span className="text-[11px] text-muted-foreground/70">
-                      Using {selectedMachineRecord.name}
-                    </span>
+              <div className="rounded-lg border border-white/8 bg-black/10 px-3 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+                    Actions
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {availableReviewAgents.map((agent) => (
-                      <Button
-                        key={`review-comments-request-${agent}`}
-                        variant="outline"
-                        size="sm"
-                        disabled={!selectedMachineSlug}
-                        onClick={() => void handleRequestReview(agent)}
-                      >
-                        <Users className="h-3.5 w-3.5" />
-                        <AgentInlineLabel agent={agent} prefix="Request review with" />
-                      </Button>
-                    ))}
-                  </div>
+                  <span className="text-[11px] text-muted-foreground/70">
+                    Using {selectedMachineRecord.name}
+                  </span>
                 </div>
-                <div className="flex flex-wrap justify-end gap-2">
-                {(["claude", "codex"] as const).map((reviewerId) => {
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {availableReviewAgents.map((agent) => (
+                    <Button
+                      key={`review-comments-request-${agent}`}
+                      variant="outline"
+                      size="sm"
+                      disabled={!selectedMachineSlug}
+                      onClick={() => void handleRequestReview(agent)}
+                    >
+                      <Users className="h-3.5 w-3.5" />
+                      <AgentInlineLabel agent={agent} prefix="Request review with" />
+                    </Button>
+                  ))}
+                  {(["claude", "codex"] as const).map((reviewerId) => {
                   const pendingCount = pendingReviewCommentCounts.get(reviewerId) ?? 0;
                   const reanalyzeCount = (reviewComments ?? []).filter(
                     (comment) =>
@@ -1944,10 +1940,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   if (pendingCount === 0 && reanalyzeCount === 0 && fixCount === 0 && publishCount === 0) return null;
 
                   return (
-                    <div key={`${reviewerId}-toolbar`} className="flex flex-wrap items-center gap-2 rounded-lg border border-white/8 bg-black/10 px-3 py-2">
-                      <Badge variant="outline" className="gap-1.5">
-                        <AgentInlineLabel agent={reviewerId} prefix="Comments from" />
-                      </Badge>
+                    <>
                       {pendingCount > 0
                         ? availableAnalyzerAgents.map((agent) => (
                             <Button
@@ -1957,7 +1950,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                             >
                               <Sparkles className="h-3.5 w-3.5" />
                               <span className="inline-flex items-center gap-1.5">
-                                <AgentInlineLabel agent={agent} prefix="Analyze with" />
+                                <span>Analyze</span>
+                                <AgentInlineLabel agent={reviewerId} />
+                                <span>comments with</span>
+                                <AgentInlineLabel agent={agent} />
                                 <span>({pendingCount})</span>
                               </span>
                             </Button>
@@ -1972,7 +1968,13 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                               onClick={() => void handleAnalyzeReviewComments(reviewerId, agent, true)}
                             >
                               <RefreshCw className="h-3.5 w-3.5" />
-                              <AgentInlineLabel agent={agent} prefix="Re-analyze with" />
+                              <span className="inline-flex items-center gap-1.5">
+                                <span>Re-analyze</span>
+                                <AgentInlineLabel agent={reviewerId} />
+                                <span>comments with</span>
+                                <AgentInlineLabel agent={agent} />
+                                <span>({reanalyzeCount})</span>
+                              </span>
                             </Button>
                           ))
                         : null}
@@ -1985,7 +1987,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                             >
                               <Wrench className="h-3.5 w-3.5" />
                               <span className="inline-flex items-center gap-1.5">
-                                <AgentInlineLabel agent={agent} prefix="Fix with" />
+                                <span>Fix</span>
+                                <AgentInlineLabel agent={reviewerId} />
+                                <span>comments with</span>
+                                <AgentInlineLabel agent={agent} />
                                 <span>({fixCount})</span>
                               </span>
                             </Button>
@@ -1994,10 +1999,14 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                       {publishCount > 0 && selectedMachineRecord.capabilities.gh ? (
                         <Button variant="outline" size="sm" onClick={() => void handlePublishReview(reviewerId)}>
                           <Upload className="h-3.5 w-3.5" />
-                          <AgentInlineLabel agent={reviewerId} prefix="Publish" />
+                          <span className="inline-flex items-center gap-1.5">
+                            <span>Publish</span>
+                            <AgentInlineLabel agent={reviewerId} />
+                            <span>review ({publishCount})</span>
+                          </span>
                         </Button>
                       ) : null}
-                    </div>
+                    </>
                   );
                 })}
                 </div>
