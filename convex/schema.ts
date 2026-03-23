@@ -265,6 +265,7 @@ export default defineSchema({
       v.literal("analyze_comments"),
       v.literal("fix_comments"),
       v.literal("request_review"),
+      v.literal("publish_review"),
       v.literal("reply_comment"),
       v.literal("machine_command"),
     ),

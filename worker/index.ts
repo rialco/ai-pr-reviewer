@@ -7,9 +7,10 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 import { buildReviewPrompt, parseReviewOutput } from "../server/infrastructure/reviewers/reviewPrompt";
+import { formatGitHubCommentBody } from "../server/infrastructure/reviewers/reviewPrompt";
 import { analyzeComments, type AnalysisProgressEvent, type AnalyzerAgent } from "../server/services/analyzer";
 import { fixComments, type FixerAgent } from "../server/services/fixer";
-import { getPRDiff } from "../server/services/github";
+import { getPRDiff, submitPRReview } from "../server/services/github";
 import { fetchOrigin } from "../server/services/git";
 import type { BotComment, CommentState, RepoConfig } from "../server/types";
 import {
@@ -1138,6 +1139,111 @@ async function executeJob(client: ConvexHttpClient, session: WorkerSession, job:
         {
           step: "persist_fix_results",
           detail: `Stored ${results.length} local fix result(s) in Convex`,
+          status: "done" as const,
+          ts: now,
+        },
+      ],
+    };
+  }
+
+  if (job.kind === "publish_review") {
+    const source = typeof payload?.source === "string" ? payload.source : null;
+    const repoId = typeof payload?.repoId === "string" ? (payload.repoId as Id<"repos">) : null;
+    const repoLabel = typeof payload?.repoLabel === "string" ? payload.repoLabel : null;
+    const prNumber = typeof payload?.prNumber === "number" ? payload.prNumber : null;
+    const reviewerId =
+      payload?.reviewerId === "claude" || payload?.reviewerId === "codex"
+        ? payload.reviewerId
+        : null;
+
+    if (source !== "local_review_comments" || !repoId || !repoLabel || !prNumber || !reviewerId) {
+      throw new Error("publish_review payload is missing repo or publish context.");
+    }
+
+    const capabilities = detectCapabilities();
+    if (!capabilities.gh) {
+      throw new Error("GitHub CLI is not available on this machine.");
+    }
+
+    const bundle = await client.query(api.reviews.getPublishableReviewBundleForMachine, {
+      machineToken: session.machineToken,
+      repoId,
+      prNumber,
+      reviewerId,
+    });
+
+    if (bundle.comments.length === 0) {
+      return {
+        output: [
+          `[publish_review] completed at ${now}`,
+          `[publish_review] repo=${repoLabel}`,
+          `[publish_review] reviewer=${reviewerId}`,
+          "[publish_review] no local review comments ready to publish",
+        ],
+        steps: [
+          {
+            step: "load_publishable_comments",
+            detail: "No local review comments are ready to publish",
+            status: "done" as const,
+            ts: now,
+          },
+        ],
+      };
+    }
+
+    const displayName = reviewerId.charAt(0).toUpperCase() + reviewerId.slice(1);
+    const score = bundle.review?.confidenceScore ?? null;
+    const summary = bundle.review?.summary ?? "";
+    const event = score !== null && score < 2 ? "REQUEST_CHANGES" : "COMMENT";
+
+    await submitPRReview(repoLabel, prNumber, {
+      body: `## ${displayName} Review${score !== null ? ` — Confidence: ${score}/5` : ""}\n\n${summary}`,
+      event,
+      comments: bundle.comments.map((comment) => ({
+        path: comment.path,
+        line: comment.line,
+        body: formatGitHubCommentBody({
+          path: comment.path,
+          line: comment.line,
+          body: comment.body,
+          suggestion: comment.suggestion ?? undefined,
+        }),
+      })),
+    });
+
+    await client.mutation(api.reviews.markReviewCommentsPublished, {
+      machineToken: session.machineToken,
+      repoId,
+      prNumber,
+      reviewerId,
+      event,
+      publishedAt: now,
+    });
+
+    return {
+      output: [
+        `[publish_review] completed at ${now}`,
+        `[publish_review] repo=${repoLabel}`,
+        `[publish_review] reviewer=${reviewerId}`,
+        `[publish_review] event=${event}`,
+        `[publish_review] comments=${bundle.comments.length}`,
+      ],
+      steps: [
+        {
+          step: "load_publishable_comments",
+          detail: `${bundle.comments.length} local review comment(s)`,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "submit_github_review",
+          detail: `${reviewerId} via gh`,
+          status: "done" as const,
+          ts: now,
+        },
+        {
+          step: "persist_publish_state",
+          detail: `Marked ${bundle.comments.length} comment(s) as published`,
           status: "done" as const,
           ts: now,
         },

@@ -31,6 +31,8 @@ function timelineLabel(eventType: string) {
   if (eventType === "comments_fetched") return "GitHub snapshot updated";
   if (eventType === "analysis_requested") return "Review comment analysis requested";
   if (eventType === "analysis_failed") return "Review comment analysis failed";
+  if (eventType === "review_publish_requested") return "Review publish requested";
+  if (eventType === "review_publish_failed") return "Review publish failed";
   if (eventType === "local_fix_started") return "Local fix requested";
   if (eventType === "local_fix_completed") return "Local fix completed";
   if (eventType === "local_fix_failed") return "Local fix failed";
@@ -44,6 +46,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const enqueueReviewRequest = useMutation(api.jobs.enqueueReviewRequest);
   const enqueueReviewCommentAnalysis = useMutation(api.jobs.enqueueReviewCommentAnalysis);
   const enqueueReviewCommentFix = useMutation(api.jobs.enqueueReviewCommentFix);
+  const enqueueReviewPublish = useMutation(api.jobs.enqueueReviewPublish);
   const detail = useQuery(
     api.prs.getDetailForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
@@ -73,6 +76,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [fixError, setFixError] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
 
   const repoMachineConfigs = useMemo(
     () => (machineConfigs ?? []).filter((config) => config.repoLabel === repo),
@@ -111,6 +115,25 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         continue;
       }
       if (comment.status !== "analyzed" && comment.status !== "fix_failed") {
+        continue;
+      }
+      counts.set(comment.reviewerId, (counts.get(comment.reviewerId) ?? 0) + 1);
+    }
+    return counts;
+  }, [reviewComments]);
+  const publishableReviewCommentCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const comment of reviewComments ?? []) {
+      if (comment.publishedAt || comment.supersededAt) {
+        continue;
+      }
+      if (comment.status !== "analyzed") {
+        continue;
+      }
+      if (
+        comment.analysisCategory === "DISMISS" ||
+        comment.analysisCategory === "ALREADY_ADDRESSED"
+      ) {
         continue;
       }
       counts.set(comment.reviewerId, (counts.get(comment.reviewerId) ?? 0) + 1);
@@ -220,6 +243,25 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       });
     } catch (error) {
       setFixError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handlePublishReview = async (reviewerId: "claude" | "codex") => {
+    if (!activeWorkspaceId || !selectedMachineSlug) {
+      return;
+    }
+
+    try {
+      setPublishError(null);
+      await enqueueReviewPublish({
+        workspaceId: activeWorkspaceId,
+        repoLabel: repo,
+        prNumber,
+        machineSlug: selectedMachineSlug,
+        reviewerId,
+      });
+    } catch (error) {
+      setPublishError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -364,6 +406,11 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   {fixError}
                 </div>
               ) : null}
+              {publishError ? (
+                <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {publishError}
+                </div>
+              ) : null}
 
               {comments.length === 0 ? (
                 <div className="mt-3 rounded-xl border border-dashed border-white/10 px-4 py-6 text-sm text-muted-foreground">
@@ -460,7 +507,8 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   {(["claude", "codex"] as const).map((reviewerId) => {
                     const pendingCount = pendingReviewCommentCounts.get(reviewerId) ?? 0;
                     const fixableCount = fixableReviewCommentCounts.get(reviewerId) ?? 0;
-                    if (pendingCount === 0 && fixableCount === 0) return null;
+                    const publishableCount = publishableReviewCommentCounts.get(reviewerId) ?? 0;
+                    if (pendingCount === 0 && fixableCount === 0 && publishableCount === 0) return null;
 
                     return (
                       <div
@@ -474,6 +522,9 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                             : ""}
                           {fixableCount > 0
                             ? `${pendingCount > 0 ? " · " : " · "}${fixableCount} ready to fix`
+                            : ""}
+                          {publishableCount > 0
+                            ? `${pendingCount > 0 || fixableCount > 0 ? " · " : " · "}${publishableCount} ready to publish`
                             : ""}
                         </span>
                         {pendingCount > 0 && selectedMachineRecord.capabilities.claude ? (
@@ -510,6 +561,15 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                             onClick={() => void handleFixReviewComments(reviewerId, "codex")}
                           >
                             Fix with Codex
+                          </Button>
+                        ) : null}
+                        {publishableCount > 0 && selectedMachineRecord.capabilities.gh ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handlePublishReview(reviewerId)}
+                          >
+                            Publish to GitHub
                           </Button>
                         ) : null}
                       </div>
@@ -559,6 +619,16 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                           ) : null}
                         </div>
                       ) : null}
+                      {comment.publishedAt ? (
+                        <div className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-sm text-violet-100/90">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">
+                            Published
+                          </p>
+                          <p className="mt-2 text-sm leading-6">
+                            Sent to GitHub on {formatTimestamp(comment.publishedAt)}
+                          </p>
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -600,7 +670,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               <div className="flex items-start gap-3">
                 <AlertCircle className="mt-0.5 h-4 w-4 text-amber-300" />
                 <div className="text-sm text-amber-100/90">
-                  GitHub PR detail, review requests, review comment triage, and local comment fixes are cloud-backed now. Replies and publish flows are still on the remaining migration path.
+                  GitHub PR detail, review requests, local comment triage, fixes, and review publishing are cloud-backed now. Reply flows are still on the remaining migration path.
                 </div>
               </div>
             </Card>

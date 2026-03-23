@@ -183,6 +183,64 @@ export const listFixableCommentsForMachine = query({
   },
 });
 
+export const getPublishableReviewBundleForMachine = query({
+  args: {
+    machineToken: v.string(),
+    repoId: v.id("repos"),
+    prNumber: v.number(),
+    reviewerId: v.union(v.literal("claude"), v.literal("codex")),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const repo = await ctx.db.get(args.repoId);
+
+    if (!repo || repo.workspaceId !== machine.workspaceId || repo.archivedAt) {
+      throw new Error("Repo not found for this machine workspace.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const [reviews, comments] = await Promise.all([
+      ctx.db
+        .query("reviews")
+        .withIndex("by_prId_reviewer", (q) => q.eq("prId", pr._id).eq("reviewerId", args.reviewerId))
+        .collect(),
+      ctx.db
+        .query("reviewComments")
+        .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+        .collect(),
+    ]);
+    const latestReview = reviews.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null;
+    const publishableComments = comments
+      .filter(
+        (comment) =>
+          comment.reviewerId === args.reviewerId &&
+          !comment.supersededAt &&
+          !comment.publishedAt &&
+          comment.status === "analyzed" &&
+          comment.analysisCategory !== "DISMISS" &&
+          comment.analysisCategory !== "ALREADY_ADDRESSED",
+      )
+      .sort((a, b) => {
+        const pathCompare = a.path.localeCompare(b.path);
+        if (pathCompare !== 0) return pathCompare;
+        return a.line - b.line;
+      });
+
+    return {
+      review: latestReview,
+      comments: publishableComments,
+    };
+  },
+});
+
 export const upsertReviewResult = mutation({
   args: {
     machineToken: v.string(),
@@ -508,5 +566,73 @@ export const finalizeReviewCommentFixResults = mutation({
     });
 
     return { ok: true, fixed: activeFixingComments.length };
+  },
+});
+
+export const markReviewCommentsPublished = mutation({
+  args: {
+    machineToken: v.string(),
+    repoId: v.id("repos"),
+    prNumber: v.number(),
+    reviewerId: v.union(v.literal("claude"), v.literal("codex")),
+    event: v.union(v.literal("COMMENT"), v.literal("REQUEST_CHANGES")),
+    publishedAt: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const repo = await ctx.db.get(args.repoId);
+
+    if (!repo || repo.workspaceId !== machine.workspaceId || repo.archivedAt) {
+      throw new Error("Repo not found for this machine workspace.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const comments = await ctx.db
+      .query("reviewComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+    const publishableComments = comments.filter(
+      (comment) =>
+        comment.reviewerId === args.reviewerId &&
+        !comment.supersededAt &&
+        !comment.publishedAt &&
+        comment.status === "analyzed" &&
+        comment.analysisCategory !== "DISMISS" &&
+        comment.analysisCategory !== "ALREADY_ADDRESSED",
+    );
+
+    for (const comment of publishableComments) {
+      await ctx.db.patch(comment._id, {
+        publishedAt: args.publishedAt,
+        updatedAt: args.publishedAt,
+      });
+    }
+
+    await ctx.db.insert("timelineEvents", {
+      workspaceId: machine.workspaceId,
+      prId: pr._id,
+      eventType: "review_published",
+      detail: {
+        reviewerId: args.reviewerId,
+        machineSlug: machine.slug,
+        commentCount: publishableComments.length,
+        event: args.event,
+      },
+      createdAt: args.publishedAt,
+    });
+
+    await ctx.db.patch(pr._id, {
+      updatedAt: args.publishedAt,
+    });
+
+    return { ok: true, published: publishableComments.length };
   },
 });
