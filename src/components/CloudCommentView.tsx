@@ -265,6 +265,45 @@ function AnalysisDetailsPanel({
   );
 }
 
+function ReviewerSignalPanel({
+  reviewSeverity,
+  reviewConfidence,
+  reviewEvidence,
+}: {
+  reviewSeverity?: string | null;
+  reviewConfidence?: number | null;
+  reviewEvidence?: {
+    filesRead?: string[];
+    changedLinesChecked?: string[];
+    ruleReferences?: string[];
+    riskSummary?: string;
+  } | null;
+}) {
+  if (!reviewSeverity && reviewConfidence == null && !reviewEvidence) return null;
+
+  return (
+    <div className="mt-3 rounded-md border border-border/60 bg-background/50 px-3 py-2 text-xs text-muted-foreground space-y-1.5">
+      <div className="flex flex-wrap gap-1">
+        <Badge variant="outline">Reviewer Signal</Badge>
+        {reviewSeverity ? <Badge variant="outline">{reviewSeverity}</Badge> : null}
+        {reviewConfidence != null ? <Badge variant="outline">Confidence {reviewConfidence}/5</Badge> : null}
+      </div>
+      {reviewEvidence?.riskSummary ? (
+        <div><span className="font-medium text-foreground">Risk:</span> {reviewEvidence.riskSummary}</div>
+      ) : null}
+      {joinMeta(reviewEvidence?.filesRead) ? (
+        <div><span className="font-medium text-foreground">Files:</span> {joinMeta(reviewEvidence?.filesRead)}</div>
+      ) : null}
+      {joinMeta(reviewEvidence?.changedLinesChecked) ? (
+        <div><span className="font-medium text-foreground">Changed lines:</span> {joinMeta(reviewEvidence?.changedLinesChecked)}</div>
+      ) : null}
+      {joinMeta(reviewEvidence?.ruleReferences) ? (
+        <div><span className="font-medium text-foreground">References:</span> {joinMeta(reviewEvidence?.ruleReferences)}</div>
+      ) : null}
+    </div>
+  );
+}
+
 function CollapsibleSection({
   title,
   count,
@@ -1674,6 +1713,11 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                           <div className="mt-3 text-sm leading-6 text-foreground/88">
                             <MarkdownBody text={comment.body} />
                           </div>
+                          <ReviewerSignalPanel
+                            reviewSeverity={comment.reviewSeverity}
+                            reviewConfidence={comment.reviewConfidence}
+                            reviewEvidence={comment.reviewEvidence}
+                          />
                           <AnalysisDetailsPanel
                             analysisReasoning={comment.analysisReasoning}
                             analysisDetails={comment.analysisDetails}
@@ -1722,6 +1766,11 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                       <div className="mt-3 text-sm leading-6 text-foreground/88">
                         <MarkdownBody text={comment.body} />
                       </div>
+                      <ReviewerSignalPanel
+                        reviewSeverity={comment.reviewSeverity}
+                        reviewConfidence={comment.reviewConfidence}
+                        reviewEvidence={comment.reviewEvidence}
+                      />
                       <AnalysisDetailsPanel
                         analysisReasoning={comment.analysisReasoning}
                         analysisDetails={comment.analysisDetails}

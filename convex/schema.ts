@@ -273,6 +273,16 @@ export default defineSchema({
     line: v.number(),
     body: v.string(),
     status: v.string(),
+    reviewSeverity: v.optional(v.union(v.literal("critical"), v.literal("major"), v.literal("minor"))),
+    reviewConfidence: v.optional(v.number()),
+    reviewEvidence: v.optional(
+      v.object({
+        filesRead: v.array(v.string()),
+        changedLinesChecked: v.array(v.string()),
+        ruleReferences: v.array(v.string()),
+        riskSummary: v.optional(v.string()),
+      }),
+    ),
     analysisCategory: v.optional(v.string()),
     analysisReasoning: v.optional(v.string()),
     analysisDetails: v.optional(
