@@ -4,7 +4,6 @@ import { FolderOpen, GitBranch, Loader2, RefreshCw, Trash2 } from "lucide-react"
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useRemoveRepo, useRepos, useSyncRepo, useUpdateRepo } from "../hooks/useApi";
-import { hasCloudEnv } from "../lib/cloud";
 import { RepoDirectoryBrowser } from "./RepoDirectoryBrowser";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
@@ -354,5 +353,5 @@ function CloudRepoList() {
 }
 
 export function RepoList() {
-  return hasCloudEnv ? <CloudRepoList /> : <LocalRepoList />;
+  return <CloudRepoList />;
 }

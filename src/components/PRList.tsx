@@ -5,7 +5,6 @@ import { Badge } from "./ui/badge";
 import { AgentLogo, getAgentLabel } from "./ui/agent-logo";
 import { Switch } from "./ui/switch";
 import { api } from "../../convex/_generated/api";
-import { hasCloudEnv } from "../lib/cloud";
 import { cn } from "@/lib/utils";
 import { GitPullRequest, ExternalLink, ChevronDown, ChevronRight } from "lucide-react";
 
@@ -408,5 +407,5 @@ function CloudPRList({ onSelectPR, selectedPR }: PRListProps) {
 }
 
 export function PRList(props: PRListProps) {
-  return hasCloudEnv ? <CloudPRList {...props} /> : <LocalPRList {...props} />;
+  return <CloudPRList {...props} />;
 }

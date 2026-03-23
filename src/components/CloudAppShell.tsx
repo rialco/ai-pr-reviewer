@@ -1,6 +1,6 @@
 import { SignInButton, UserButton } from "@clerk/react";
 import { Authenticated, AuthLoading, Unauthenticated, useMutation, useQuery } from "convex/react";
-import { Cloud, Copy, KeyRound, LaptopMinimalCheck, ShieldCheck, ShieldPlus, ServerCog, Trash2, Users } from "lucide-react";
+import { Cloud, Copy, KeyRound, ShieldCheck, ShieldPlus, ServerCog, Trash2, Users } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { App } from "@/App";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -373,32 +373,57 @@ function SignedInApp() {
   );
 }
 
-function LegacyLocalMode() {
+function CloudSetupRequiredScreen() {
   return (
-    <div className="relative h-screen">
-      <div className="pointer-events-none absolute bottom-4 right-4 z-50 max-w-sm">
-        <Card className="pointer-events-auto border-primary/20 bg-card/95 shadow-2xl backdrop-blur">
-          <CardHeader>
-            <div className="flex items-center gap-2 text-primary">
-              <LaptopMinimalCheck className="h-4 w-4" />
-              <CardTitle>Legacy Local Mode</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm text-muted-foreground">
-            <p>
-              Cloud auth is not configured yet, so the app falls back to the original local-only
-              backend and skips the Clerk + Convex control plane.
+    <div className="flex h-screen items-center justify-center bg-background px-6">
+      <Card className="w-full max-w-xl border-border/80 bg-card shadow-2xl">
+        <CardHeader className="space-y-3">
+          <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary">
+            <Cloud className="h-5 w-5" />
+          </div>
+          <CardTitle className="text-lg">Cloud Setup Required</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4 text-sm text-muted-foreground">
+          <p>
+            Local mode is no longer supported. This app now requires Clerk and Convex to load the
+            workspace, machines, PR state, and job control plane.
+          </p>
+          <div>
+            <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-foreground/80">
+              Missing Env
             </p>
-            <div>
-              <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-foreground/80">
-                Missing Env
-              </p>
-              <p>{missingCloudEnv.join(", ")}</p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-      <App />
+            <p>{missingCloudEnv.join(", ")}</p>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function CloudAuthShell() {
+  return (
+    <>
+      <AuthLoading>
+        <LoadingScreen />
+      </AuthLoading>
+      <Unauthenticated>
+        <SignInScreen />
+      </Unauthenticated>
+      <Authenticated>
+        <SignedInApp />
+      </Authenticated>
+    </>
+  );
+}
+
+export function CloudAppShell() {
+  if (!hasCloudEnv) {
+    return <CloudSetupRequiredScreen />;
+  }
+
+  return (
+    <div className="h-screen">
+      <CloudAuthShell />
     </div>
   );
 }
@@ -445,25 +470,5 @@ function SignInScreen() {
         </CardContent>
       </Card>
     </div>
-  );
-}
-
-export function CloudAppShell() {
-  if (!hasCloudEnv) {
-    return <LegacyLocalMode />;
-  }
-
-  return (
-    <>
-      <AuthLoading>
-        <LoadingScreen />
-      </AuthLoading>
-      <Unauthenticated>
-        <SignInScreen />
-      </Unauthenticated>
-      <Authenticated>
-        <SignedInApp />
-      </Authenticated>
-    </>
   );
 }

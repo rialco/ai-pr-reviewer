@@ -8,7 +8,7 @@ import { CloudAppShell } from "./components/CloudAppShell";
 import {
   clerkPublishableKey,
   getConvexReactClient,
-  hasCloudEnv,
+  missingCloudEnv,
 } from "./lib/cloud";
 
 const queryClient = new QueryClient({
@@ -27,7 +27,7 @@ function AppProviders() {
     </QueryClientProvider>
   );
 
-  if (!hasCloudEnv) {
+  if (missingCloudEnv.length > 0) {
     return app;
   }
 

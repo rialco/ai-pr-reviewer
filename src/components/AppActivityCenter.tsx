@@ -1,6 +1,4 @@
-import { JobCenter } from "./JobCenter";
 import { CloudJobCenter } from "./CloudJobCenter";
-import { hasCloudEnv } from "../lib/cloud";
 
 interface AppActivityCenterProps {
   onNavigateToPR: (repo: string, prNumber: number) => void;
@@ -10,5 +8,5 @@ interface AppActivityCenterProps {
 }
 
 export function AppActivityCenter(props: AppActivityCenterProps) {
-  return hasCloudEnv ? <CloudJobCenter {...props} /> : <JobCenter {...props} />;
+  return <CloudJobCenter {...props} />;
 }

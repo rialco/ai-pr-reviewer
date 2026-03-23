@@ -7,7 +7,6 @@ import { CoordinatorDock } from "./components/CoordinatorDock";
 import { RepoList } from "./components/RepoList";
 import { PRList } from "./components/PRList";
 import { useAppSummary } from "./hooks/useAppSummary";
-import { hasCloudEnv } from "./lib/cloud";
 import { cn } from "./lib/utils";
 import { ChevronDown, ChevronRight, Github, MessageSquare } from "lucide-react";
 
@@ -104,9 +103,7 @@ export function App() {
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
             <Github className="h-12 w-12 mb-4 opacity-20" />
             <p className="text-sm">Select a PR to view bot comments</p>
-            <p className="text-xs mt-1">
-              {hasCloudEnv ? "Add a repository checkout to get started" : "Add a repo to get started — PRs sync automatically"}
-            </p>
+            <p className="text-xs mt-1">Add a repository checkout to get started</p>
           </div>
         )}
       </main>
