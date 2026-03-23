@@ -251,70 +251,92 @@ function AnalysisDetailsPanel({
   } | null;
   suggestion?: string | null;
 }) {
+  const [expanded, setExpanded] = useState(false);
+
   if (!analysisReasoning && !analysisDetails && !suggestion) return null;
 
   return (
     <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-100/90">
-      {analysisReasoning ? (
-        <>
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 text-left"
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <div className="flex items-center gap-2">
           <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
             Analysis
           </p>
-          <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{analysisReasoning}</p>
+          {analysisDetails?.severity ? (
+            <Badge variant={categoryVariant[analysisDetails.severity] ?? "outline"}>
+              {categoryLabel[analysisDetails.severity] ?? analysisDetails.severity}
+            </Badge>
+          ) : null}
+          {analysisDetails?.confidence != null ? (
+            <Badge variant="outline">Confidence {analysisDetails.confidence}/5</Badge>
+          ) : null}
+        </div>
+        {expanded ? <ChevronDown className="h-3.5 w-3.5 text-emerald-300/70" /> : <ChevronRight className="h-3.5 w-3.5 text-emerald-300/70" />}
+      </button>
+
+      {expanded ? (
+        <>
+          {analysisReasoning ? (
+            <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{analysisReasoning}</p>
+          ) : null}
+
+          {analysisDetails ? (
+            <div className="mt-3 rounded border border-emerald-500/15 bg-black/10 p-3 text-xs text-emerald-100/80">
+              <div className="flex flex-wrap gap-2">
+                {analysisDetails.severity ? (
+                  <Badge variant={categoryVariant[analysisDetails.severity] ?? "outline"}>
+                    {categoryLabel[analysisDetails.severity] ?? analysisDetails.severity}
+                  </Badge>
+                ) : null}
+                {analysisDetails.confidence != null ? (
+                  <Badge variant="outline">Confidence {analysisDetails.confidence}/5</Badge>
+                ) : null}
+                {analysisDetails.verdict ? (
+                  <Badge variant="outline">{analysisDetails.verdict}</Badge>
+                ) : null}
+                {analysisDetails.accessMode ? (
+                  <Badge variant="outline">
+                    {analysisDetails.accessMode === "FULL_CODEBASE" ? "Full Codebase" : "Diff Only"}
+                  </Badge>
+                ) : null}
+              </div>
+
+              {analysisDetails.evidence?.riskSummary ? (
+                <p className="mt-2"><span className="font-medium text-foreground">Risk:</span> {analysisDetails.evidence.riskSummary}</p>
+              ) : null}
+              {analysisDetails.evidence?.validationNotes ? (
+                <p className="mt-1"><span className="font-medium text-foreground">Limitations:</span> {analysisDetails.evidence.validationNotes}</p>
+              ) : null}
+              {joinMeta(analysisDetails.evidence?.filesRead) ? (
+                <p className="mt-1"><span className="font-medium text-foreground">Files:</span> {joinMeta(analysisDetails.evidence?.filesRead)}</p>
+              ) : null}
+              {joinMeta(analysisDetails.evidence?.symbolsChecked) ? (
+                <p className="mt-1"><span className="font-medium text-foreground">Symbols:</span> {joinMeta(analysisDetails.evidence?.symbolsChecked)}</p>
+              ) : null}
+              {joinMeta(analysisDetails.evidence?.callersChecked) ? (
+                <p className="mt-1"><span className="font-medium text-foreground">Callers:</span> {joinMeta(analysisDetails.evidence?.callersChecked)}</p>
+              ) : null}
+              {joinMeta(analysisDetails.evidence?.testsChecked) ? (
+                <p className="mt-1"><span className="font-medium text-foreground">Tests:</span> {joinMeta(analysisDetails.evidence?.testsChecked)}</p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {suggestion ? (
+            <div className="mt-3 rounded border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-100/85">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
+                Suggested Change
+              </p>
+              <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5">
+                {suggestion}
+              </pre>
+            </div>
+          ) : null}
         </>
-      ) : null}
-
-      {analysisDetails ? (
-        <div className="mt-3 rounded border border-emerald-500/15 bg-black/10 p-3 text-xs text-emerald-100/80">
-          <div className="flex flex-wrap gap-2">
-            {analysisDetails.severity ? (
-              <Badge variant={categoryVariant[analysisDetails.severity] ?? "outline"}>
-                {categoryLabel[analysisDetails.severity] ?? analysisDetails.severity}
-              </Badge>
-            ) : null}
-            {analysisDetails.confidence != null ? (
-              <Badge variant="outline">Confidence {analysisDetails.confidence}/5</Badge>
-            ) : null}
-            {analysisDetails.verdict ? (
-              <Badge variant="outline">{analysisDetails.verdict}</Badge>
-            ) : null}
-            {analysisDetails.accessMode ? (
-              <Badge variant="outline">
-                {analysisDetails.accessMode === "FULL_CODEBASE" ? "Full Codebase" : "Diff Only"}
-              </Badge>
-            ) : null}
-          </div>
-
-          {analysisDetails.evidence?.riskSummary ? (
-            <p className="mt-2"><span className="font-medium text-foreground">Risk:</span> {analysisDetails.evidence.riskSummary}</p>
-          ) : null}
-          {analysisDetails.evidence?.validationNotes ? (
-            <p className="mt-1"><span className="font-medium text-foreground">Limitations:</span> {analysisDetails.evidence.validationNotes}</p>
-          ) : null}
-          {joinMeta(analysisDetails.evidence?.filesRead) ? (
-            <p className="mt-1"><span className="font-medium text-foreground">Files:</span> {joinMeta(analysisDetails.evidence?.filesRead)}</p>
-          ) : null}
-          {joinMeta(analysisDetails.evidence?.symbolsChecked) ? (
-            <p className="mt-1"><span className="font-medium text-foreground">Symbols:</span> {joinMeta(analysisDetails.evidence?.symbolsChecked)}</p>
-          ) : null}
-          {joinMeta(analysisDetails.evidence?.callersChecked) ? (
-            <p className="mt-1"><span className="font-medium text-foreground">Callers:</span> {joinMeta(analysisDetails.evidence?.callersChecked)}</p>
-          ) : null}
-          {joinMeta(analysisDetails.evidence?.testsChecked) ? (
-            <p className="mt-1"><span className="font-medium text-foreground">Tests:</span> {joinMeta(analysisDetails.evidence?.testsChecked)}</p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {suggestion ? (
-        <div className="mt-3 rounded border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-100/85">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">
-            Suggested Change
-          </p>
-          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5">
-            {suggestion}
-          </pre>
-        </div>
       ) : null}
     </div>
   );
@@ -334,26 +356,39 @@ function ReviewerSignalPanel({
     riskSummary?: string;
   } | null;
 }) {
+  const [expanded, setExpanded] = useState(false);
+
   if (!reviewSeverity && reviewConfidence == null && !reviewEvidence) return null;
 
   return (
     <div className="mt-3 rounded-md border border-border/60 bg-background/50 px-3 py-2 text-xs text-muted-foreground space-y-1.5">
-      <div className="flex flex-wrap gap-1">
-        <Badge variant="outline">Reviewer Signal</Badge>
-        {reviewSeverity ? <Badge variant="outline">{reviewSeverity}</Badge> : null}
-        {reviewConfidence != null ? <Badge variant="outline">Confidence {reviewConfidence}/5</Badge> : null}
-      </div>
-      {reviewEvidence?.riskSummary ? (
-        <div><span className="font-medium text-foreground">Risk:</span> {reviewEvidence.riskSummary}</div>
-      ) : null}
-      {joinMeta(reviewEvidence?.filesRead) ? (
-        <div><span className="font-medium text-foreground">Files:</span> {joinMeta(reviewEvidence?.filesRead)}</div>
-      ) : null}
-      {joinMeta(reviewEvidence?.changedLinesChecked) ? (
-        <div><span className="font-medium text-foreground">Changed lines:</span> {joinMeta(reviewEvidence?.changedLinesChecked)}</div>
-      ) : null}
-      {joinMeta(reviewEvidence?.ruleReferences) ? (
-        <div><span className="font-medium text-foreground">References:</span> {joinMeta(reviewEvidence?.ruleReferences)}</div>
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 text-left"
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <div className="flex flex-wrap items-center gap-1">
+          <Badge variant="outline">Reviewer Signal</Badge>
+          {reviewSeverity ? <Badge variant="outline">{reviewSeverity}</Badge> : null}
+          {reviewConfidence != null ? <Badge variant="outline">Confidence {reviewConfidence}/5</Badge> : null}
+        </div>
+        {expanded ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/70" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/70" />}
+      </button>
+      {expanded ? (
+        <>
+          {reviewEvidence?.riskSummary ? (
+            <div><span className="font-medium text-foreground">Risk:</span> {reviewEvidence.riskSummary}</div>
+          ) : null}
+          {joinMeta(reviewEvidence?.filesRead) ? (
+            <div><span className="font-medium text-foreground">Files:</span> {joinMeta(reviewEvidence?.filesRead)}</div>
+          ) : null}
+          {joinMeta(reviewEvidence?.changedLinesChecked) ? (
+            <div><span className="font-medium text-foreground">Changed lines:</span> {joinMeta(reviewEvidence?.changedLinesChecked)}</div>
+          ) : null}
+          {joinMeta(reviewEvidence?.ruleReferences) ? (
+            <div><span className="font-medium text-foreground">References:</span> {joinMeta(reviewEvidence?.ruleReferences)}</div>
+          ) : null}
+        </>
       ) : null}
     </div>
   );
