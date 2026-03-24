@@ -13,11 +13,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { SectionHeader } from "./ui/section-header";
 import { AgentLogo, getAgentLabel } from "./ui/agent-logo";
 import { ConfirmDialog } from "./ui/confirm-dialog";
+import { Switch } from "./ui/switch";
+import { getNextPrWorkflowStep } from "../../core/domain/review/nextStep";
 
 interface CloudCommentViewProps {
   repo: string;
   prNumber: number;
 }
+
+type WorkspaceJobFeedItem = NonNullable<ReturnType<typeof useQuery<typeof api.jobs.listFeedForWorkspace>>>[number];
 
 type TimelineHistoryStep = {
   step: string;
@@ -96,6 +100,7 @@ type TimelineDisplayItem =
       event: {
         _id: string;
         createdAt: string;
+        detail: Record<string, unknown>;
         debugDetail?: unknown;
       };
       isLatest: boolean;
@@ -134,6 +139,7 @@ const timelineEventConfig: Record<
   review_published: { icon: Upload, label: "Review published", color: "text-emerald-400", tone: "success", toneLabel: "Success" },
   review_publish_failed: { icon: X, label: "Review publish failed", color: "text-destructive", tone: "error", toneLabel: "Failed" },
   comment_recategorized: { icon: Sparkles, label: "Comment recategorized", color: "text-sky-300", tone: "info", toneLabel: "Updated" },
+  pr_skip_typecheck_updated: { icon: Sparkles, label: "PR verification updated", color: "text-sky-300", tone: "info", toneLabel: "Updated" },
 };
 
 
@@ -171,6 +177,42 @@ function getTimelineRunHistory(debugDetail: Record<string, unknown> | null) {
     return null;
   }
   return candidate as TimelineRunHistory;
+}
+
+function getTimelineRunHistoryFromJobRun(
+  run:
+    | {
+        status: string;
+        startedAt: string;
+        finishedAt?: string;
+        steps: TimelineHistoryStep[];
+        output: string[];
+      }
+    | null
+    | undefined,
+) {
+  if (!run) {
+    return null;
+  }
+
+  const currentStep = [...run.steps].reverse().find((step) => step.status === "active") ?? null;
+  return {
+    status: run.status,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    currentStep: currentStep?.step,
+    detail: currentStep?.detail,
+    steps: run.steps,
+    output: run.output,
+  } satisfies TimelineRunHistory;
+}
+
+function hasTimelineEventDetails(event: { detail: Record<string, unknown>; debugDetail?: unknown }) {
+  if (event.debugDetail && typeof event.debugDetail === "object") {
+    return true;
+  }
+
+  return !!event.detail && Object.keys(event.detail).length > 0;
 }
 
 function getTimelineConfig(eventType: string) {
@@ -508,6 +550,106 @@ function ReviewerSignalPanel({
   );
 }
 
+type ReviewCommentCardData = {
+  _id: string;
+  reviewerId: string;
+  path: string;
+  line: number;
+  body: string;
+  status: string;
+  analysisCategory?: string | null;
+  reviewSeverity?: string | null;
+  reviewConfidence?: number | null;
+  reviewEvidence?: {
+    filesRead?: string[];
+    changedLinesChecked?: string[];
+    ruleReferences?: string[];
+    riskSummary?: string;
+  } | null;
+  analysisReasoning?: string | null;
+  analysisDetails?: {
+    verdict?: string | null;
+    severity?: string | null;
+    confidence?: number | null;
+    accessMode?: string | null;
+    evidence?: {
+      filesRead?: string[];
+      symbolsChecked?: string[];
+      callersChecked?: string[];
+      testsChecked?: string[];
+      riskSummary?: string;
+      validationNotes?: string;
+    } | null;
+  } | null;
+  suggestion?: string | null;
+  fixCommitHash?: string | null;
+  fixFilesChanged?: string[] | null;
+  fixFixedAt?: string | null;
+  publishedAt?: string | null;
+  supersededAt?: string | null;
+};
+
+function ReviewCommentCard({
+  comment,
+  dimmed = false,
+}: {
+  comment: ReviewCommentCardData;
+  dimmed?: boolean;
+}) {
+  return (
+    <Card className={cn("border-white/8 bg-black/10 px-3 py-3", dimmed && "opacity-80")}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant="outline" className="gap-1.5">
+          <AgentInlineLabel agent={comment.reviewerId as "claude" | "codex"} prefix="Reviewed by" />
+        </Badge>
+        <Badge variant="outline">{comment.path}:{comment.line}</Badge>
+        <Badge variant="outline">{comment.status}</Badge>
+        {comment.analysisCategory ? (
+          <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
+            {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
+          </Badge>
+        ) : null}
+        {comment.supersededAt ? <Badge variant="outline">Superseded</Badge> : null}
+      </div>
+      <div className="mt-3 text-sm leading-6 text-foreground/88">
+        <MarkdownBody text={comment.body} />
+      </div>
+      <ReviewerSignalPanel
+        reviewSeverity={comment.reviewSeverity}
+        reviewConfidence={comment.reviewConfidence}
+        reviewEvidence={comment.reviewEvidence}
+      />
+      <AnalysisDetailsPanel
+        analysisReasoning={comment.analysisReasoning}
+        analysisDetails={comment.analysisDetails}
+        suggestion={comment.suggestion}
+      />
+      {comment.fixCommitHash ? (
+        <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>
+          <p className="mt-2 text-sm leading-6">
+            Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
+            {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
+          </p>
+          {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
+            <p className="mt-1 text-xs text-sky-100/80">
+              {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
+              {comment.fixFilesChanged.length > 4 ? "..." : ""}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+      {comment.publishedAt ? (
+        <div className="mt-3 inline-flex max-w-full items-center gap-2 rounded-md border border-violet-500/20 bg-violet-500/5 px-3 py-1.5 text-xs text-violet-100/85">
+          <Upload className="h-3.5 w-3.5 shrink-0 text-violet-300/80" />
+          <span className="font-medium text-violet-200/90">Published</span>
+          <span className="truncate text-violet-100/75">Sent to GitHub on {formatTimestamp(comment.publishedAt)}</span>
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
 function TimelineCard({
   events,
   suggestion,
@@ -636,7 +778,7 @@ function TimelineCard({
                 ) : null}
                 {item.description ? <p className="mt-0.5 text-[11px] leading-5 text-muted-foreground/75">{item.description}</p> : null}
               </div>
-              {item.event.debugDetail ? (
+              {hasTimelineEventDetails(item.event) ? (
                 <Button variant="outline" size="sm" className="h-6 shrink-0 gap-1.5 px-2 text-[10px]" onClick={() => onViewDetails(item.event._id)}>
                   <FileCode className="h-3 w-3" />
                   View details
@@ -685,6 +827,7 @@ function timelineLabel(eventType: string) {
   if (eventType === "local_fix_completed") return "Local fix completed";
   if (eventType === "local_fix_failed") return "Local fix failed";
   if (eventType === "local_fix_no_changes") return "Local fix made no changes";
+  if (eventType === "pr_skip_typecheck_updated") return "PR verification updated";
   return eventType.replaceAll("_", " ");
 }
 
@@ -692,6 +835,64 @@ function localAgentLabel(agent: string | undefined) {
   if (agent === "claude") return "Claude Code";
   if (agent === "codex") return "Codex";
   return agent ?? "Unknown";
+}
+
+function activeJobSummary(job: WorkspaceJobFeedItem, activeCount: number) {
+  const payload =
+    job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
+      ? (job.payload as Record<string, unknown>)
+      : null;
+  const source = payload?.source === "local_review_comments" ? "local review comments" : "GitHub comments";
+  const machineLabel = job.targetMachineSlug ? `on ${job.targetMachineSlug}` : "on a linked machine";
+  const latestActiveStep = [...(job.latestRun?.steps ?? [])].reverse().find((step) => step.status === "active") ?? null;
+  const runDetail =
+    latestActiveStep?.detail ??
+    latestActiveStep?.step ??
+    null;
+
+  let title = "Automation in progress";
+  let description = `${job.status === "queued" ? "Queued" : "Running"} ${machineLabel}.`;
+  let icon = Loader2;
+  let tone: "warning" | "info" | "success" | "neutral" = "info";
+
+  if (job.kind === "refresh_pr") {
+    title = "Refreshing PR snapshot";
+  } else if (job.kind === "analyze_comments") {
+    const analyzerAgent = typeof payload?.analyzerAgent === "string" ? localAgentLabel(payload.analyzerAgent) : null;
+    title = `Analyzing ${source}`;
+    description = `${job.status === "queued" ? "Queued" : "Running"} ${machineLabel}${analyzerAgent ? ` with ${analyzerAgent}` : ""}.`;
+    icon = Sparkles;
+    tone = "warning";
+  } else if (job.kind === "fix_comments") {
+    const fixerAgent = typeof payload?.fixerAgent === "string" ? localAgentLabel(payload.fixerAgent) : null;
+    title = `Fixing ${source}`;
+    description = `${job.status === "queued" ? "Queued" : "Running"} ${machineLabel}${fixerAgent ? ` with ${fixerAgent}` : ""}.`;
+    icon = Wrench;
+  } else if (job.kind === "request_review") {
+    const reviewerId = typeof payload?.reviewerId === "string" ? payload.reviewerId : undefined;
+    title = `Running ${localAgentLabel(reviewerId)} review`;
+    description = `${job.status === "queued" ? "Queued" : "Running"} ${machineLabel}.`;
+    icon = Users;
+  } else if (job.kind === "publish_review") {
+    const reviewerId = typeof payload?.reviewerId === "string" ? payload.reviewerId : undefined;
+    title = `Publishing ${localAgentLabel(reviewerId)} review`;
+    description = `${job.status === "queued" ? "Queued" : "Running"} ${machineLabel}.`;
+    icon = Upload;
+  } else if (job.kind === "reply_comment") {
+    title = "Replying to GitHub comments";
+    description = `${job.status === "queued" ? "Queued" : "Running"} ${machineLabel}.`;
+    icon = MessageSquareReply;
+  }
+
+  if (runDetail) {
+    description = `${description} ${runDetail}`;
+  }
+
+  if (activeCount > 1) {
+    description = `${activeCount} jobs are already in progress for this PR. ${description}`;
+  }
+
+  return { title, description, icon, tone };
 }
 
 function scoreAccent(score: number | null | undefined) {
@@ -751,6 +952,12 @@ function formatTimelineDetail(event: { eventType: string; detail: Record<string,
       return typeof d.errorMessage === "string" ? d.errorMessage.split("\n")[0] : "Review publish failed";
     case "comment_recategorized":
       return `Set category to ${typeof d.category === "string" ? d.category : "unknown"}`;
+    case "pr_skip_typecheck_updated":
+      return typeof d.skipTypecheck === "boolean"
+        ? d.skipTypecheck
+          ? "Typecheck will be skipped for future fix runs on this PR"
+          : "Typecheck will run for future fix runs on this PR"
+        : "PR verification preference updated";
     default:
       return null;
   }
@@ -759,6 +966,7 @@ function formatTimelineDetail(event: { eventType: string; detail: Record<string,
 export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const { activeWorkspaceId } = useActiveWorkspace();
   const resetPrData = useMutation(api.prs.resetForWorkspace);
+  const setPrSkipTypecheck = useMutation(api.prs.setSkipTypecheckForWorkspace);
   const updateSettings = useMutation(api.settings.updateForWorkspace);
   const enqueuePrRefresh = useMutation(api.jobs.enqueuePrRefresh);
   const enqueueGithubCommentAnalysis = useMutation(api.jobs.enqueueGithubCommentAnalysis);
@@ -781,6 +989,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     api.prs.listTimelineForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
   );
+  const jobFeed = useQuery(
+    api.jobs.listFeedForWorkspace,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
+  );
   const machineConfigs = useQuery(
     api.repos.listMachineConfigsForWorkspace,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId } : "skip",
@@ -791,6 +1003,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   );
   const reviews = useQuery(
     api.reviews.listForPr,
+    activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
+  );
+  const reviewHistory = useQuery(
+    api.reviews.listHistoryForPr,
     activeWorkspaceId ? { workspaceId: activeWorkspaceId, repoLabel: repo, prNumber } : "skip",
   );
   const reviewComments = useQuery(
@@ -808,6 +1024,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [resetError, setResetError] = useState<string | null>(null);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
+  const [isUpdatingSkipTypecheck, setIsUpdatingSkipTypecheck] = useState(false);
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
   const [timelineTab, setTimelineTab] = useState<"history" | "parameters" | "prompt">("history");
   const [selectedReviewerId, setSelectedReviewerId] = useState<"claude" | "codex" | null>(null);
@@ -816,6 +1033,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const [reviewFilter, setReviewFilter] = useState<CommentFilter>("all");
   const [showBody, setShowBody] = useState(false);
   const [showAllFiles, setShowAllFiles] = useState(false);
+  const [expandedHistoryReviewIds, setExpandedHistoryReviewIds] = useState<Record<string, boolean>>({});
   const timelineEventDetail = useQuery(
     api.prs.getTimelineEventForWorkspace,
     activeWorkspaceId && selectedTimelineEventId
@@ -857,8 +1075,14 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       ].filter(Boolean) as Array<"claude" | "codex">),
     [selectedMachineRecord],
   );
-  const suggestedAnalyzerAgent = availableAnalyzerAgents[0] ?? null;
-  const suggestedFixerAgent = availableFixerAgents[0] ?? null;
+  const suggestedAnalyzerAgent =
+    (preferredActionAgent && availableAnalyzerAgents.includes(preferredActionAgent) ? preferredActionAgent : null) ??
+    availableAnalyzerAgents[0] ??
+    null;
+  const suggestedFixerAgent =
+    (preferredActionAgent && availableFixerAgents.includes(preferredActionAgent) ? preferredActionAgent : null) ??
+    availableFixerAgents[0] ??
+    null;
   const persistedPreferredActionAgent = settings ? settings.defaultAnalyzerAgent : null;
 
   useEffect(() => {
@@ -891,33 +1115,37 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     });
   };
   const githubComments = detail?.comments ?? [];
+  const automatableGithubComments = useMemo(
+    () => githubComments.filter((comment) => detail?.repoBotUsers.includes(comment.user) ?? false),
+    [detail?.repoBotUsers, githubComments],
+  );
   const pendingGithubCommentCount = useMemo(
     () =>
-      githubComments.filter(
+      automatableGithubComments.filter(
         (comment) =>
           comment.status === "new" || comment.status === "analyzing",
       ).length,
-    [githubComments],
+    [automatableGithubComments],
   );
   const fixableGithubCommentCount = useMemo(
     () =>
-      githubComments.filter(
+      automatableGithubComments.filter(
         (comment) =>
-          (comment.status === "analyzed" || comment.status === "fix_failed") &&
+          comment.status === "analyzed" &&
           (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX"),
       ).length,
-    [githubComments],
+    [automatableGithubComments],
   );
   const replyableGithubCommentCount = useMemo(
     () =>
-      githubComments.filter(
+      automatableGithubComments.filter(
         (comment) =>
           comment.type === "inline" &&
           comment.status === "fixed" &&
           !comment.repliedAt &&
           !!comment.fixCommitHash,
       ).length,
-    [githubComments],
+    [automatableGithubComments],
   );
   const reviewerSummaries = useMemo(() => {
     const ids = ["claude", "codex"] as const;
@@ -942,45 +1170,63 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     timelineEventDetail ?? (timeline ?? []).find((event) => event._id === selectedTimelineEventId) ?? null;
   const selectedReviewerSummary =
     reviewerSummaries.find((summary) => summary.reviewerId === selectedReviewerId) ?? null;
+  const historicalReviewCycles = useMemo(
+    () =>
+      (reviewHistory ?? []).filter(
+        (cycle) => !cycle.isLatestForReviewer && cycle.comments.length > 0,
+      ),
+    [reviewHistory],
+  );
   const githubPending = useMemo(
-    () => githubComments.filter((comment) => comment.status === "new" || comment.status === "analyzing"),
-    [githubComments],
+    () => automatableGithubComments.filter((comment) => comment.status === "new" || comment.status === "analyzing"),
+    [automatableGithubComments],
   );
   const githubFixing = useMemo(
-    () => githubComments.filter((comment) => comment.status === "fixing"),
-    [githubComments],
+    () => automatableGithubComments.filter((comment) => comment.status === "fixing"),
+    [automatableGithubComments],
   );
   const githubFixFailed = useMemo(
-    () => githubComments.filter((comment) => comment.status === "fix_failed"),
-    [githubComments],
+    () => automatableGithubComments.filter((comment) => comment.status === "fix_failed"),
+    [automatableGithubComments],
+  );
+  const githubNeedsHumanReview = useMemo(
+    () => automatableGithubComments.filter((comment) => comment.status === "needs_human_review"),
+    [automatableGithubComments],
   );
   const githubFixed = useMemo(
-    () => githubComments.filter((comment) => comment.status === "fixed"),
-    [githubComments],
+    () => automatableGithubComments.filter((comment) => comment.status === "fixed"),
+    [automatableGithubComments],
   );
   const githubMustFix = useMemo(
-    () => githubComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "MUST_FIX"),
-    [githubComments],
+    () => automatableGithubComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "MUST_FIX"),
+    [automatableGithubComments],
   );
   const githubShouldFix = useMemo(
-    () => githubComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "SHOULD_FIX"),
-    [githubComments],
+    () => automatableGithubComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "SHOULD_FIX"),
+    [automatableGithubComments],
   );
   const githubNiceToHave = useMemo(
-    () => githubComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "NICE_TO_HAVE"),
-    [githubComments],
+    () => automatableGithubComments.filter((comment) => comment.status !== "fixed" && comment.analysisCategory === "NICE_TO_HAVE"),
+    [automatableGithubComments],
   );
   const githubAlreadyAddressed = useMemo(
-    () => githubComments.filter((comment) => comment.analysisCategory === "ALREADY_ADDRESSED"),
-    [githubComments],
+    () => automatableGithubComments.filter((comment) => comment.analysisCategory === "ALREADY_ADDRESSED"),
+    [automatableGithubComments],
   );
   const githubDismissedByAnalysis = useMemo(
-    () => githubComments.filter((comment) => comment.analysisCategory === "DISMISS"),
-    [githubComments],
+    () => automatableGithubComments.filter((comment) => comment.analysisCategory === "DISMISS"),
+    [automatableGithubComments],
   );
   const githubReanalyzableCount = useMemo(
-    () => githubComments.filter((comment) => comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed").length,
-    [githubComments],
+    () =>
+      automatableGithubComments.filter(
+        (comment) =>
+          comment.status === "analyzed" ||
+          comment.status === "fix_failed" ||
+          comment.status === "fixed" ||
+          comment.status === "needs_human_review",
+      ).length,
+    [automatableGithubComments],
   );
   const reviewPending = useMemo(
     () => (reviewComments ?? []).filter((comment) => comment.status === "new" || comment.status === "analyzing"),
@@ -992,6 +1238,10 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   );
   const reviewFixFailed = useMemo(
     () => (reviewComments ?? []).filter((comment) => comment.status === "fix_failed"),
+    [reviewComments],
+  );
+  const reviewNeedsHumanReview = useMemo(
+    () => (reviewComments ?? []).filter((comment) => comment.status === "needs_human_review"),
     [reviewComments],
   );
   const reviewFixed = useMemo(
@@ -1019,7 +1269,15 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     [reviewComments],
   );
   const reviewReanalyzableCount = useMemo(
-    () => (reviewComments ?? []).filter((comment) => !comment.supersededAt && (comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed")).length,
+    () =>
+      (reviewComments ?? []).filter(
+        (comment) =>
+          !comment.supersededAt &&
+          (comment.status === "analyzed" ||
+            comment.status === "fix_failed" ||
+            comment.status === "fixed" ||
+            comment.status === "needs_human_review"),
+      ).length,
     [reviewComments],
   );
   const reviewFixableCount = useMemo(
@@ -1028,10 +1286,21 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
         (comment) =>
           !comment.supersededAt &&
           (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX") &&
-          (comment.status === "analyzed" || comment.status === "fix_failed"),
+          comment.status === "analyzed",
       ).length,
     [reviewComments],
   );
+  const activePrJobs = useMemo(
+    () =>
+      (jobFeed ?? []).filter(
+        (job) =>
+          job.repoLabel === repo &&
+          job.prNumber === prNumber &&
+          (job.status === "queued" || job.status === "claimed" || job.status === "running"),
+      ),
+    [jobFeed, prNumber, repo],
+  );
+  const currentActivePrJob = activePrJobs[0] ?? null;
   const publishableReviewCount = useMemo(
     () =>
       (reviewComments ?? []).filter(
@@ -1168,8 +1437,20 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   ]);
 
   useEffect(() => {
-    setTimelineTab("history");
-  }, [selectedTimelineEventId]);
+    if (!selectedTimelineEvent) {
+      setTimelineTab("history");
+      return;
+    }
+
+    const hasDebugDetail =
+      !!selectedTimelineEvent.debugDetail && typeof selectedTimelineEvent.debugDetail === "object";
+    const hasStructuredDetail =
+      !!selectedTimelineEvent.detail &&
+      typeof selectedTimelineEvent.detail === "object" &&
+      Object.keys(selectedTimelineEvent.detail).length > 0;
+
+    setTimelineTab(hasDebugDetail ? "history" : hasStructuredDetail ? "parameters" : "history");
+  }, [selectedTimelineEvent]);
 
   useEffect(() => {
     setReviewDetailsTab("summary");
@@ -1211,6 +1492,31 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
   const extraFiles = pr.files.slice(8);
   const bodyText = pr.body.trim();
   const hasLongBody = bodyText.length > 500;
+  const effectiveSkipTypecheck = pr.skipTypecheck ?? selectedMachine?.skipTypecheck ?? false;
+  const workflowNextStep = getNextPrWorkflowStep({
+    botUsers: detail.repoBotUsers,
+    reviewerIds: availableReviewAgents,
+    pr: {
+      createdAt: pr.createdAt,
+      lastFixedAt: pr.lastFixedAt,
+    },
+    githubComments,
+    reviewComments: (reviewComments ?? []).map((comment) => ({
+      reviewerId: comment.reviewerId as "claude" | "codex",
+      status: comment.status,
+      analysisCategory: comment.analysisCategory,
+      supersededAt: comment.supersededAt,
+    })),
+    reviews: (reviews ?? []).map((review) => ({
+      reviewerId: review.reviewerId as "claude" | "codex",
+      updatedAt: review.updatedAt,
+      confidenceScore: review.confidenceScore,
+    })),
+  });
+  const blockedGithubCommentCount =
+    workflowNextStep.kind === "reanalyze_blocked_comments" ? workflowNextStep.blockedGithubCommentCount : 0;
+  const blockedReviewCommentCount =
+    workflowNextStep.kind === "reanalyze_blocked_comments" ? workflowNextStep.blockedReviewCommentCount : 0;
 
   const handleRefresh = async () => {
     if (!activeWorkspaceId || !selectedMachineSlug) {
@@ -1255,6 +1561,24 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     }
   };
 
+  const handleTogglePrSkipTypecheck = async (nextValue: boolean) => {
+    if (!activeWorkspaceId || isUpdatingSkipTypecheck) {
+      return;
+    }
+
+    try {
+      setIsUpdatingSkipTypecheck(true);
+      await setPrSkipTypecheck({
+        workspaceId: activeWorkspaceId,
+        repoLabel: repo,
+        prNumber,
+        skipTypecheck: nextValue,
+      });
+    } finally {
+      setIsUpdatingSkipTypecheck(false);
+    }
+  };
+
   const handleRequestReview = async (reviewerId: "claude" | "codex") => {
     if (!activeWorkspaceId || !selectedMachineSlug) {
       return;
@@ -1292,7 +1616,12 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               return false;
             }
             if (reanalyze) {
-              return comment.status === "analyzed" || comment.status === "fix_failed" || comment.status === "fixed";
+              return (
+                comment.status === "analyzed" ||
+                comment.status === "fix_failed" ||
+                comment.status === "fixed" ||
+                comment.status === "needs_human_review"
+              );
             }
             return comment.status === "new" || comment.status === "analyzing";
           })
@@ -1313,7 +1642,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             (comment) =>
               !comment.supersededAt &&
               (comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX") &&
-              (comment.status === "analyzed" || comment.status === "fix_failed"),
+              comment.status === "analyzed",
           )
           .map((comment) => comment.reviewerId),
       ),
@@ -1342,6 +1671,15 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
 
     for (const reviewerId of reviewerIds) {
       await handlePublishReview(reviewerId);
+    }
+  };
+
+  const handleReanalyzeBlockedComments = async (analyzerAgent: "claude" | "codex") => {
+    if (blockedGithubCommentCount > 0) {
+      await handleAnalyzeGithubComments(analyzerAgent, true);
+    }
+    if (blockedReviewCommentCount > 0) {
+      await handleAnalyzePendingReviewComments(analyzerAgent, true);
     }
   };
 
@@ -1484,16 +1822,42 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
     });
   };
 
-  const suggestedTimelineStep: TimelineDisplayItem | null = !selectedMachineSlug
+  const suggestedTimelineStep: TimelineDisplayItem | null = currentActivePrJob
     ? {
-        key: "suggested-select-machine",
+        key: `suggested-job-${currentActivePrJob._id}`,
         kind: "suggested",
-        title: "Select a machine checkout",
-        description: "Choose a linked machine checkout before running refresh, triage, fix, or review actions for this PR.",
-        icon: Sparkles,
-        tone: "neutral",
+        ...activeJobSummary(currentActivePrJob, activePrJobs.length),
       }
-    : pendingGithubCommentCount > 0 && suggestedAnalyzerAgent
+    : !selectedMachineSlug
+      ? {
+          key: "suggested-select-machine",
+          kind: "suggested",
+          title: "Select a machine checkout",
+          description: "Choose a linked machine checkout before running refresh, triage, fix, or review actions for this PR.",
+          icon: Sparkles,
+          tone: "neutral",
+        }
+    : workflowNextStep.kind === "reanalyze_blocked_comments"
+      ? suggestedAnalyzerAgent
+        ? {
+            key: "suggested-reanalyze-blocked",
+            kind: "suggested",
+            title: "Manual review required",
+            description: "Automation stopped on blocked comments. Re-analyze or recategorize them before continuing the review cycle.",
+            icon: Sparkles,
+            buttonLabel: "Re-analyze",
+            tone: "warning",
+            onClick: () => void handleReanalyzeBlockedComments(suggestedAnalyzerAgent),
+          }
+        : {
+            key: "suggested-manual-blocked",
+            kind: "suggested",
+            title: "Manual review required",
+            description: "Automation stopped on blocked comments and no analyzer is available on this machine to re-triage them.",
+            icon: Sparkles,
+            tone: "warning",
+          }
+    : workflowNextStep.kind === "analyze_github_comments" && suggestedAnalyzerAgent
       ? {
           key: "suggested-triage-github",
           kind: "suggested",
@@ -1504,7 +1868,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
           tone: "warning",
           onClick: () => void handleAnalyzeGithubComments(suggestedAnalyzerAgent),
         }
-      : fixableGithubCommentCount > 0 && suggestedFixerAgent
+      : workflowNextStep.kind === "fix_github_comments" && suggestedFixerAgent
         ? {
             key: "suggested-fix-github",
             kind: "suggested",
@@ -1515,7 +1879,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
             tone: "info",
             onClick: () => void handleFixGithubComments(suggestedFixerAgent),
           }
-        : replyableGithubCommentCount > 0 && selectedMachineRecord?.capabilities.gh
+        : workflowNextStep.kind === "reply_github_comments" && selectedMachineRecord?.capabilities.gh
           ? {
               key: "suggested-reply-github",
               kind: "suggested",
@@ -1526,34 +1890,68 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
               tone: "success",
               onClick: () => void handleReplyToGithubComments(),
             }
-          : reviewPending.length > 0 && suggestedAnalyzerAgent
+          : workflowNextStep.kind === "analyze_review_comments" && suggestedAnalyzerAgent
             ? {
                 key: "suggested-triage-local",
                 kind: "suggested",
                 title: "Analyze local review comments",
-                description: "Review comments from local reviewers need categorization before they can be fixed or published.",
+                description: `${workflowNextStep.count} pending comment${workflowNextStep.count === 1 ? "" : "s"} from ${
+                  workflowNextStep.reviewerIds.length === 0
+                    ? "local reviewers"
+                    : workflowNextStep.reviewerIds.map((reviewerId) => getAgentLabel(reviewerId)).join(" and ")
+                } still need categorization before they can be fixed or re-reviewed.`,
                 icon: Sparkles,
                 buttonLabel: "Analyze",
                 tone: "warning",
                 onClick: () => void handleAnalyzePendingReviewComments(suggestedAnalyzerAgent),
               }
-            : availableReviewAgents.length > 0
+            : workflowNextStep.kind === "fix_review_comments" && suggestedFixerAgent
               ? {
-                  key: "suggested-request-review",
+                  key: "suggested-fix-local",
                   kind: "suggested",
-                  title: availableReviewAgents.length > 1 ? "Request reviews" : `Request review with ${getAgentLabel(availableReviewAgents[0])}`,
-                  description: availableReviewAgents.length > 1
-                    ? "Run both local reviewers to gather actionable comments before triage and fix steps."
-                    : "The fastest next step is to run a fresh local review and gather actionable comments.",
-                  icon: Users,
-                  buttonLabel: "Review",
-                  tone: "neutral",
-                  onClick: () =>
-                    void (availableReviewAgents.length > 1
-                      ? handleRequestAllAvailableReviews()
-                      : handleRequestReview(availableReviewAgents[0])),
+                  title: "Fix local review comments",
+                  description: "Triaged local review comments should be fixed before requesting another review pass.",
+                  icon: Wrench,
+                  buttonLabel: "Fix issues",
+                  tone: "info",
+                  onClick: () => void handleFixPendingReviewComments(suggestedFixerAgent),
                 }
-              : null;
+              : workflowNextStep.kind === "manual_confidence_review"
+                ? {
+                    key: "suggested-manual-confidence",
+                    kind: "suggested",
+                    title: "Manual review required",
+                    description: "A reviewer stayed below 4/5 without producing new actionable comments. Automation stopped to avoid a review loop.",
+                    icon: Sparkles,
+                    tone: "warning",
+                  }
+                : workflowNextStep.kind === "request_review"
+                  ? {
+                      key: "suggested-request-review",
+                      kind: "suggested",
+                      title:
+                        workflowNextStep.reviewerIds.length > 1
+                          ? "Request reviews"
+                          : `Request review with ${getAgentLabel(workflowNextStep.reviewerIds[0])}`,
+                      description: "Request the next review pass to refresh confidence and verify the latest fixes.",
+                      icon: Users,
+                      buttonLabel: "Review",
+                      tone: "neutral",
+                      onClick: () =>
+                        void (workflowNextStep.reviewerIds.length > 1
+                          ? Promise.all(workflowNextStep.reviewerIds.map((reviewerId) => handleRequestReview(reviewerId)))
+                          : handleRequestReview(workflowNextStep.reviewerIds[0])),
+                    }
+                  : workflowNextStep.kind === "complete"
+                    ? {
+                        key: "suggested-complete",
+                        kind: "suggested",
+                        title: "Review cycle complete",
+                        description: "Latest reviewer scores are 4/5 or better and there are no active must-fix or should-fix comments.",
+                        icon: Sparkles,
+                        tone: "success",
+                      }
+                    : null;
 
   return (
     <div className="relative space-y-4">
@@ -1613,6 +2011,16 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                     </Button>
                   </>
                 ) : null}
+                <div className="flex items-center gap-2 rounded-md border border-white/8 bg-black/10 px-2.5 py-1.5">
+                  <span className="text-[11px] text-muted-foreground">Skip typecheck</span>
+                  <Switch
+                    checked={effectiveSkipTypecheck}
+                    size="sm"
+                    disabled={isUpdatingSkipTypecheck}
+                    aria-label={effectiveSkipTypecheck ? "Disable skip typecheck for this PR" : "Enable skip typecheck for this PR"}
+                    onClick={() => void handleTogglePrSkipTypecheck(!effectiveSkipTypecheck)}
+                  />
+                </div>
                 <Button variant="destructive" size="sm" onClick={() => setResetDialogOpen(true)}>
                   <Trash2 className="h-3.5 w-3.5" />
                   Reset PR data
@@ -2044,56 +2452,92 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                 </div>
 
                 {visibleReviewComments.map((comment) => (
-                  <Card key={comment._id} className="border-white/8 bg-black/10 px-3 py-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="gap-1.5">
-                        <AgentInlineLabel agent={comment.reviewerId as "claude" | "codex"} prefix="Reviewed by" />
-                      </Badge>
-                      <Badge variant="outline">{comment.path}:{comment.line}</Badge>
-                      <Badge variant="outline">{comment.status}</Badge>
-                      {comment.analysisCategory ? (
-                        <Badge variant={categoryVariant[comment.analysisCategory] ?? "outline"}>
-                          {categoryLabel[comment.analysisCategory] ?? comment.analysisCategory}
-                        </Badge>
-                      ) : null}
-                    </div>
-                    <div className="mt-3 text-sm leading-6 text-foreground/88">
-                      <MarkdownBody text={comment.body} />
-                    </div>
-                    <ReviewerSignalPanel
-                      reviewSeverity={comment.reviewSeverity}
-                      reviewConfidence={comment.reviewConfidence}
-                      reviewEvidence={comment.reviewEvidence}
-                    />
-                    <AnalysisDetailsPanel
-                      analysisReasoning={comment.analysisReasoning}
-                      analysisDetails={comment.analysisDetails}
-                      suggestion={comment.suggestion}
-                    />
-                    {comment.fixCommitHash ? (
-                      <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-sm text-sky-100/90">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-300/80">Fix Result</p>
-                        <p className="mt-2 text-sm leading-6">
-                          Commit <span className="font-mono">{comment.fixCommitHash.slice(0, 12)}</span>
-                          {comment.fixFixedAt ? ` · ${formatTimestamp(comment.fixFixedAt)}` : ""}
-                        </p>
-                        {comment.fixFilesChanged && comment.fixFilesChanged.length > 0 ? (
-                          <p className="mt-1 text-xs text-sky-100/80">
-                            {comment.fixFilesChanged.length} file{comment.fixFilesChanged.length === 1 ? "" : "s"} changed: {comment.fixFilesChanged.slice(0, 4).join(", ")}
-                            {comment.fixFilesChanged.length > 4 ? "..." : ""}
-                          </p>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    {comment.publishedAt ? (
-                      <div className="mt-3 inline-flex max-w-full items-center gap-2 rounded-md border border-violet-500/20 bg-violet-500/5 px-3 py-1.5 text-xs text-violet-100/85">
-                        <Upload className="h-3.5 w-3.5 shrink-0 text-violet-300/80" />
-                        <span className="font-medium text-violet-200/90">Published</span>
-                        <span className="truncate text-violet-100/75">Sent to GitHub on {formatTimestamp(comment.publishedAt)}</span>
-                      </div>
-                    ) : null}
-                  </Card>
+                  <ReviewCommentCard key={comment._id} comment={comment} />
                 ))}
+
+                {historicalReviewCycles.length > 0 ? (
+                  <div className="rounded-lg border border-border/60 bg-background/25">
+                    <div className="border-b border-border/60 px-3 py-2.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">
+                        Previous Review Cycles
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Prior review runs remain available here for traceability and re-review context.
+                      </p>
+                    </div>
+                    <div className="divide-y divide-border/60">
+                      {historicalReviewCycles.map((cycle) => {
+                        const isExpanded = Boolean(expandedHistoryReviewIds[cycle._id]);
+                        const label = getAgentLabel(cycle.reviewerId as "claude" | "codex");
+
+                        return (
+                          <div key={cycle._id}>
+                            <button
+                              type="button"
+                              className="flex w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-background/40"
+                              onClick={() =>
+                                setExpandedHistoryReviewIds((current) => ({
+                                  ...current,
+                                  [cycle._id]: !current[cycle._id],
+                                }))
+                              }
+                            >
+                              <AgentLogo agent={cycle.reviewerId as "claude" | "codex"} className="h-4 w-4 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-sm font-medium text-foreground/90">{label}</span>
+                                  <Badge variant="outline">{formatTimestamp(cycle.updatedAt)}</Badge>
+                                  {cycle.confidenceScore != null ? (
+                                    <Badge variant="outline">Confidence {cycle.confidenceScore}/5</Badge>
+                                  ) : null}
+                                  <Badge variant="outline">{cycle.commentCount} comments</Badge>
+                                  {cycle.actionableCount > 0 ? (
+                                    <Badge variant="must_fix">{cycle.actionableCount} actionable</Badge>
+                                  ) : null}
+                                  {cycle.fixedCount > 0 ? (
+                                    <Badge variant="outline">{cycle.fixedCount} fixed</Badge>
+                                  ) : null}
+                                  {cycle.publishedCount > 0 ? (
+                                    <Badge variant="outline">{cycle.publishedCount} published</Badge>
+                                  ) : null}
+                                </div>
+                                {cycle.summary ? (
+                                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                                    {cycle.summary}
+                                  </p>
+                                ) : null}
+                              </div>
+                              {isExpanded ? (
+                                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              ) : (
+                                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              )}
+                            </button>
+
+                            <div
+                              className={cn(
+                                "grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-out",
+                                isExpanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+                              )}
+                            >
+                              <div className="min-h-0 overflow-hidden">
+                                <div className="space-y-3 border-t border-border/50 px-3 pb-3 pt-1">
+                                  {cycle.comments.map((comment) => (
+                                    <ReviewCommentCard
+                                      key={comment._id}
+                                      comment={comment}
+                                      dimmed
+                                    />
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : (
               <p className="mt-3 text-sm text-muted-foreground">No review comments stored in Convex yet.</p>
@@ -2111,15 +2555,50 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
       >
         {selectedTimelineEvent ? (
           (() => {
+            const relatedJob =
+              "relatedJob" in selectedTimelineEvent &&
+              selectedTimelineEvent.relatedJob &&
+              typeof selectedTimelineEvent.relatedJob === "object"
+                ? (selectedTimelineEvent.relatedJob as { payload?: unknown; latestRun?: unknown })
+                : null;
+            const relatedJobRecord = relatedJob as { payload?: unknown; latestRun?: unknown } | null;
+            const relatedJobPayload =
+              relatedJobRecord?.payload &&
+              typeof relatedJobRecord.payload === "object" &&
+              !Array.isArray(relatedJobRecord.payload)
+                ? (relatedJobRecord.payload as Record<string, unknown>)
+                : null;
+            const relatedRun =
+              relatedJobRecord &&
+              relatedJobRecord.latestRun &&
+              typeof relatedJobRecord.latestRun === "object"
+                ? (relatedJobRecord.latestRun as {
+                    status: string;
+                    startedAt: string;
+                    finishedAt?: string;
+                    steps: TimelineHistoryStep[];
+                    output: string[];
+                  })
+                : null;
+            const detailPayload =
+              selectedTimelineEvent.detail && typeof selectedTimelineEvent.detail === "object"
+                ? (selectedTimelineEvent.detail as Record<string, unknown>)
+                : null;
             const debugDetail =
               selectedTimelineEvent.debugDetail && typeof selectedTimelineEvent.debugDetail === "object"
                 ? (selectedTimelineEvent.debugDetail as Record<string, unknown>)
                 : null;
-            const history = getTimelineRunHistory(debugDetail);
+            const history = getTimelineRunHistory(debugDetail) ?? getTimelineRunHistoryFromJobRun(relatedRun);
             const prompt = typeof debugDetail?.prompt === "string" ? debugDetail.prompt : null;
-            const parameters = debugDetail
+            const parameters = (debugDetail ?? detailPayload ?? relatedJobPayload)
               ? Object.fromEntries(
-                  Object.entries(debugDetail).filter(([key]) => key !== "prompt" && key !== "history"),
+                  Object.entries({
+                    ...(relatedJobPayload ?? {}),
+                    ...(detailPayload ?? {}),
+                    ...((debugDetail ?? {}) as Record<string, unknown>),
+                  }).filter(
+                    ([key]) => key !== "prompt" && key !== "history" && key !== "jobId",
+                  ),
                 )
               : null;
             const hasParameters = parameters && Object.keys(parameters).length > 0;
@@ -2168,9 +2647,9 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                   </Button>
                 </div>
 
-                {!debugDetail ? (
+                {!debugDetail && !detailPayload && !relatedJobPayload && !history ? (
                   <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
-                    Debug details are not available for this event yet.
+                    Event details are not available for this event yet.
                   </div>
                 ) : timelineTab === "history" ? (
                   history ? (
@@ -2238,7 +2717,7 @@ export function CloudCommentView({ repo, prNumber }: CloudCommentViewProps) {
                     </div>
                   ) : (
                     <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted-foreground">
-                      Run history is not available for this event yet.
+                      Run history is not available for this event.
                     </div>
                   )
                 ) : timelineTab === "prompt" ? (

@@ -102,6 +102,105 @@ export const listCommentsForPr = query({
   },
 });
 
+export const listHistoryForPr = query({
+  args: {
+    workspaceId: v.id("workspaces"),
+    repoLabel: v.string(),
+    prNumber: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await requireWorkspaceAccess(ctx, args.workspaceId);
+    const { pr } = await getPrForWorkspace(ctx, args.workspaceId, args.repoLabel, args.prNumber);
+
+    if (!pr) {
+      return [];
+    }
+
+    const [reviews, comments] = await Promise.all([
+      ctx.db
+        .query("reviews")
+        .withIndex("by_prId_reviewer", (q) => q.eq("prId", pr._id))
+        .collect(),
+      ctx.db
+        .query("reviewComments")
+        .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+        .collect(),
+    ]);
+
+    const sortedReviews = reviews.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const latestByReviewer = new Map<string, string>();
+    for (const review of sortedReviews) {
+      if (!latestByReviewer.has(review.reviewerId)) {
+        latestByReviewer.set(review.reviewerId, review._id);
+      }
+    }
+
+    return sortedReviews.map((review) => {
+      const reviewComments = comments
+        .filter((comment) => comment.reviewId === review._id)
+        .sort((a, b) => {
+          const pathCompare = a.path.localeCompare(b.path);
+          if (pathCompare !== 0) return pathCompare;
+          return a.line - b.line;
+        });
+
+      return {
+        ...review,
+        isLatestForReviewer: latestByReviewer.get(review.reviewerId) === review._id,
+        comments: reviewComments,
+        commentCount: reviewComments.length,
+        actionableCount: reviewComments.filter(
+          (comment) =>
+            comment.analysisCategory === "MUST_FIX" || comment.analysisCategory === "SHOULD_FIX",
+        ).length,
+        fixedCount: reviewComments.filter((comment) => comment.status === "fixed").length,
+        publishedCount: reviewComments.filter((comment) => !!comment.publishedAt).length,
+        supersededCount: reviewComments.filter((comment) => !!comment.supersededAt).length,
+      };
+    });
+  },
+});
+
+export const listLatestForWorkspace = query({
+  args: {
+    workspaceId: v.id("workspaces"),
+  },
+  handler: async (ctx, args) => {
+    await requireWorkspaceAccess(ctx, args.workspaceId);
+
+    const prs = await ctx.db
+      .query("prs")
+      .withIndex("by_workspaceId_updatedAt", (q) => q.eq("workspaceId", args.workspaceId))
+      .collect();
+
+    const latestByPr = await Promise.all(
+      prs.map(async (pr) => {
+        const reviews = await ctx.db
+          .query("reviews")
+          .withIndex("by_prId_reviewer", (q) => q.eq("prId", pr._id))
+          .collect();
+
+        const latestByReviewer = new Map<string, (typeof reviews)[number]>();
+        for (const review of reviews.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
+          if (!latestByReviewer.has(review.reviewerId)) {
+            latestByReviewer.set(review.reviewerId, review);
+          }
+        }
+
+        return [...latestByReviewer.values()].map((review) => ({
+          repoLabel: pr.repoLabel,
+          prNumber: pr.prNumber,
+          reviewerId: review.reviewerId,
+          confidenceScore: review.confidenceScore ?? null,
+          updatedAt: review.updatedAt,
+        }));
+      }),
+    );
+
+    return latestByPr.flat();
+  },
+});
+
 export const listCommentsForMachine = query({
   args: {
     machineToken: v.string(),
@@ -183,6 +282,64 @@ export const listFixableCommentsForMachine = query({
   },
 });
 
+export const listPriorCommentsForMachine = query({
+  args: {
+    machineToken: v.string(),
+    repoId: v.id("repos"),
+    prNumber: v.number(),
+    reviewerId: v.union(v.literal("claude"), v.literal("codex")),
+  },
+  handler: async (ctx, args) => {
+    const machine = await requireMachineByToken(ctx, args.machineToken);
+    const repo = await ctx.db.get(args.repoId);
+
+    if (!repo || repo.workspaceId !== machine.workspaceId || repo.archivedAt) {
+      throw new Error("Repo not found for this machine workspace.");
+    }
+
+    const pr = await ctx.db
+      .query("prs")
+      .withIndex("by_repoId_prNumber", (q) => q.eq("repoId", repo._id).eq("prNumber", args.prNumber))
+      .unique();
+
+    if (!pr) {
+      throw new Error("PR not found for this repo.");
+    }
+
+    const comments = await ctx.db
+      .query("reviewComments")
+      .withIndex("by_prId", (q) => q.eq("prId", pr._id))
+      .collect();
+
+    const reviews = await ctx.db
+      .query("reviews")
+      .withIndex("by_prId_reviewer", (q) => q.eq("prId", pr._id).eq("reviewerId", args.reviewerId))
+      .collect();
+    const reviewById = new Map(reviews.map((review) => [review._id, review]));
+
+    return comments
+      .filter((comment) => comment.reviewerId === args.reviewerId)
+      .map((comment) => ({
+        path: comment.path,
+        line: comment.line,
+        body: comment.body,
+        status: comment.status,
+        analysisCategory: comment.analysisCategory ?? "UNTRIAGED",
+        reviewCreatedAt: reviewById.get(comment.reviewId)?.createdAt ?? comment.createdAt,
+        supersededAt: comment.supersededAt ?? null,
+        publishedAt: comment.publishedAt ?? null,
+        fixFixedAt: comment.fixFixedAt ?? null,
+      }))
+      .sort((a, b) => {
+        const reviewCompare = b.reviewCreatedAt.localeCompare(a.reviewCreatedAt);
+        if (reviewCompare !== 0) return reviewCompare;
+        const pathCompare = a.path.localeCompare(b.path);
+        if (pathCompare !== 0) return pathCompare;
+        return a.line - b.line;
+      });
+  },
+});
+
 export const getPublishableReviewBundleForMachine = query({
   args: {
     machineToken: v.string(),
@@ -246,11 +403,13 @@ export const upsertReviewResult = mutation({
     machineToken: v.string(),
     repoId: v.id("repos"),
     prNumber: v.number(),
+    jobId: v.optional(v.id("jobs")),
     reviewerId: v.union(v.literal("claude"), v.literal("codex")),
     source: v.union(v.literal("local"), v.literal("remote")),
     confidenceScore: v.optional(v.number()),
     summary: v.optional(v.string()),
     rawOutput: v.optional(v.string()),
+    debugDetail: v.optional(v.any()),
     comments: v.array(
       v.object({
         path: v.string(),
@@ -345,15 +504,35 @@ export const upsertReviewResult = mutation({
       prId: pr._id,
       eventType: "review_completed",
       detail: {
+        jobId: args.jobId,
         reviewerId: args.reviewerId,
         machineSlug: machine.slug,
         confidenceScore: args.confidenceScore ?? null,
         commentCount: args.comments.length,
       },
+      debugDetail: args.debugDetail,
       createdAt: now,
     });
 
+    const allReviews = await ctx.db
+      .query("reviews")
+      .withIndex("by_prId_reviewer", (q) => q.eq("prId", pr._id))
+      .collect();
+    const latestByReviewer = new Map<string, (typeof allReviews)[number]>();
+    for (const review of allReviews.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
+      if (!latestByReviewer.has(review.reviewerId)) {
+        latestByReviewer.set(review.reviewerId, review);
+      }
+    }
+    const aggregateConfidence = [...latestByReviewer.values()]
+      .map((review) => review.confidenceScore ?? null)
+      .filter((score): score is number => score !== null)
+      .reduce<number | null>((lowest, score) => (lowest === null ? score : Math.min(lowest, score)), null);
+
     await ctx.db.patch(pr._id, {
+      phase: "analyzed",
+      confidenceScore: aggregateConfidence ?? pr.confidenceScore,
+      lastReReviewAt: now,
       updatedAt: now,
     });
 
@@ -366,8 +545,10 @@ export const applyReviewCommentAnalysisResults = mutation({
     machineToken: v.string(),
     repoId: v.id("repos"),
     prNumber: v.number(),
+    jobId: v.optional(v.id("jobs")),
     reviewerId: v.union(v.literal("claude"), v.literal("codex")),
     analyzerAgent: v.union(v.literal("claude"), v.literal("codex")),
+    debugDetail: v.optional(v.any()),
     results: v.array(
       v.object({
         commentId: v.id("reviewComments"),
@@ -448,6 +629,7 @@ export const applyReviewCommentAnalysisResults = mutation({
       prId: pr._id,
       eventType: "comments_analyzed",
       detail: {
+        jobId: args.jobId,
         reviewerId: args.reviewerId,
         analyzerAgent: args.analyzerAgent,
         machineSlug: machine.slug,
@@ -458,6 +640,7 @@ export const applyReviewCommentAnalysisResults = mutation({
         }, {}),
         source: "local_review_comments",
       },
+      debugDetail: args.debugDetail,
       createdAt: now,
     });
 
@@ -470,8 +653,10 @@ export const finalizeReviewCommentFixResults = mutation({
     machineToken: v.string(),
     repoId: v.id("repos"),
     prNumber: v.number(),
+    jobId: v.optional(v.id("jobs")),
     reviewerId: v.union(v.literal("claude"), v.literal("codex")),
     fixerAgent: v.union(v.literal("claude"), v.literal("codex")),
+    debugDetail: v.optional(v.any()),
     results: v.array(
       v.object({
         commentId: v.id("reviewComments"),
@@ -514,7 +699,7 @@ export const finalizeReviewCommentFixResults = mutation({
       const now = nowIso();
       for (const comment of activeFixingComments) {
         await ctx.db.patch(comment._id, {
-          status: "analyzed",
+          status: "needs_human_review",
           updatedAt: now,
         });
       }
@@ -524,12 +709,19 @@ export const finalizeReviewCommentFixResults = mutation({
         prId: pr._id,
         eventType: "local_fix_no_changes",
         detail: {
+          jobId: args.jobId,
           reviewerId: args.reviewerId,
           fixerAgent: args.fixerAgent,
           machineSlug: machine.slug,
           commentCount: activeFixingComments.length,
         },
+        debugDetail: args.debugDetail,
         createdAt: now,
+      });
+
+      await ctx.db.patch(pr._id, {
+        phase: "blocked",
+        updatedAt: now,
       });
 
       return { ok: true, fixed: 0 };
@@ -551,6 +743,7 @@ export const finalizeReviewCommentFixResults = mutation({
       prId: pr._id,
       eventType: "local_fix_completed",
       detail: {
+        jobId: args.jobId,
         reviewerId: args.reviewerId,
         fixerAgent: args.fixerAgent,
         machineSlug: machine.slug,
@@ -558,6 +751,7 @@ export const finalizeReviewCommentFixResults = mutation({
         commitHash: primaryResult.commitHash,
         filesChanged: primaryResult.filesChanged,
       },
+      debugDetail: args.debugDetail,
       createdAt: primaryResult.fixedAt,
     });
 
@@ -577,9 +771,11 @@ export const markReviewCommentsPublished = mutation({
     machineToken: v.string(),
     repoId: v.id("repos"),
     prNumber: v.number(),
+    jobId: v.optional(v.id("jobs")),
     reviewerId: v.union(v.literal("claude"), v.literal("codex")),
     event: v.union(v.literal("COMMENT"), v.literal("REQUEST_CHANGES")),
     publishedAt: v.string(),
+    debugDetail: v.optional(v.any()),
   },
   handler: async (ctx, args) => {
     const machine = await requireMachineByToken(ctx, args.machineToken);
@@ -624,11 +820,13 @@ export const markReviewCommentsPublished = mutation({
       prId: pr._id,
       eventType: "review_published",
       detail: {
+        jobId: args.jobId,
         reviewerId: args.reviewerId,
         machineSlug: machine.slug,
         commentCount: publishableComments.length,
         event: args.event,
       },
+      debugDetail: args.debugDetail,
       createdAt: args.publishedAt,
     });
 

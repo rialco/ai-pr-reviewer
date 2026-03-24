@@ -40,21 +40,41 @@ export function buildReviewPrompt(
     body: string;
     status: string;
     analysisCategory: string;
+    reviewCreatedAt?: string;
+    supersededAt?: string | null;
+    publishedAt?: string | null;
+    fixFixedAt?: string | null;
   }> = [],
 ): string {
   const docFiles = listConvexDocs();
   const touchesConvex = diffTouchesConvex(diff);
   const hasConvexDocs = docFiles.length > 0 && touchesConvex;
   const accessMode = hasWorktree ? "FULL_CODEBASE" : "DIFF_ONLY";
+  const currentCycleComments = priorComments.filter((comment) => !comment.supersededAt);
+  const historicalComments = priorComments.filter((comment) => !!comment.supersededAt);
   const priorCommentSection = priorComments.length > 0
     ? `
-## Previous Local Review Comments From You
+## Previous Local Review Context From You
 
 These comments come from earlier review cycles on this same PR. Use them to avoid repeating already-raised concerns unless the latest code still clearly has the same problem.
 
-${priorComments.slice(0, 20).map((c, index) => (
+${currentCycleComments.length > 0 ? `### Current unresolved comments from your latest cycle
+
+${currentCycleComments.slice(0, 10).map((c, index) => (
   `${index + 1}. ${c.path}:${c.line} [status=${c.status}, category=${c.analysisCategory}]\n${c.body}`
 )).join("\n\n")}
+` : ""}
+
+${historicalComments.length > 0 ? `### Earlier comments from prior cycles
+
+${historicalComments.slice(0, 12).map((c, index) => {
+  const tags = [`status=${c.status}`, `category=${c.analysisCategory}`];
+  if (c.fixFixedAt) tags.push("fixed");
+  if (c.publishedAt) tags.push("published");
+  if (c.supersededAt) tags.push("superseded");
+  return `${index + 1}. ${c.path}:${c.line} [${tags.join(", ")}]\n${c.body}`;
+}).join("\n\n")}
+` : ""}
 
 If the new code addresses prior concerns and no new material issues were introduced, say so in the summary and return an empty comments array.
 `
